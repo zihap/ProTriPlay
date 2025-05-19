@@ -38,3 +38,9 @@ This script provides a graphical user interface (GUI) based on Tkinter, allowing
 - **Proxy Configuration**: Allows setting up HTTP/HTTPS proxies.
 - **Model Selection**: Users can choose between different AI models (DeepSeek, GPT-4, Qwen).
 - **Memory and Response Handling**: Supports handling both streaming and non-streaming AI responses.
+
+## Requirements
+
+- Python 3.10.0
+- openai=1.37.1
+- faiss=1.7.4

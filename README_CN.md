@@ -13,7 +13,7 @@
 - **use_model**：使用的 AI 模型（`deepseek-chat`、`gpt-4o-mini`、`qwen3-235b-a22b`）。
 - **try_chance, max_new_scene_generations, max_inserted_scenes**：与测试和场景生成相关的配置。
 
-### 2. `role.py`
+### 2. `role_cn.py`
 该文件定义了演员互动、记忆管理和场景动态的核心逻辑。包括 `Actor`、`Player` 和 `Director` 类，用于管理角色状态和叙事。
 
 #### 关键类：
@@ -22,7 +22,7 @@
 - **Director**：导演Agent管理整个叙事，控制场景的流动以及角色之间的互动。
 - **Screenwriter**：编剧Agent，负责剧本生成和基于预定义剧本创建对话。
 
-### 3. `my_test.py`
+### 3. `my_test_cn.py`
 该脚本模拟了一个具有记忆和特征管理的角色场景，其中 AI 驱动的玩家角色与 NPC 互动。
 
 #### 主要功能：
@@ -30,7 +30,7 @@
 - **场景模拟**：使用 `Director` 类管理场景、角色和对话，模拟互动并推动故事情节的发展。
 - **场景生成**：基于角色互动自动生成新的场景。
 
-### 4. `gui_test.py`
+### 4. `gui_test_cn.py`
 该脚本提供了一个基于 Tkinter 的图形用户界面（GUI），使用户能够与 AI 系统进行交互，发送和接收消息。
 
 #### 主要功能：

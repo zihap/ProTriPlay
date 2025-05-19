@@ -5,9 +5,9 @@ import sys
 import io
 
 # API密钥配置
-openai_api_key = "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"
-deepseek_api_key = "sk-7ff0c7d5cfe243e18da3f4f86affa409"
-qwen_api_key = "sk-c3cbded760ac4591aad781c640ccdc5d"
+openai_api_key = "<Your-API-KEY>"
+deepseek_api_key = "<Your-API-KEY>"
+qwen_api_key = "<Your-API-KEY>"
 
 # 代理配置
 http_proxy = "http://localhost:7890"

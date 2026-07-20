@@ -1,5 +1,5 @@
-from role import Actor, Player, Screenwriter, Director
-from config import max_inserted_scenes,max_inserted_scenes,try_chance
+from role_cn import Actor, Player, Screenwriter, Director
+from config import max_inserted_scenes, try_chance
 
 # 初始化角色
 # 创建调查员(玩家角色)

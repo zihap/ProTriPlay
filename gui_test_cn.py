@@ -3,18 +3,27 @@ from tkinter import scrolledtext, ttk, messagebox
 import threading
 import sys
 import io
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # API密钥配置
 openai_api_key = "<Your-API-KEY>"
 deepseek_api_key = "<Your-API-KEY>"
 qwen_api_key = "<Your-API-KEY>"
+ark_api_key = os.getenv("ARK_API_KEY", "<Your-Ark-API-KEY>")
+ark_base_url = os.getenv("API_URL", "https://ark.cn-beijing.volces.com/api/plan/v3")
+ark_model = "deepseek-v4-pro"
+ark_embedding_model = "doubao-embedding-vision"
+ark_embedding_dim = 2048
 
 # 代理配置
-http_proxy = "http://localhost:7890"
-https_proxy = "http://localhost:7890"
+http_proxy = ""
+https_proxy = ""
 
 # 模型配置
-use_model = "deepseek-chat"  # 可选: "gpt-4o-mini", "deepseek-chat", "qwen3-235b-a22b" 
+use_model = "ark"  # 可选: "gpt-4o-mini", "deepseek-chat", "qwen3-235b-a22b", "ark"
 
 # 测试配置
 try_chance = 2  # 场景循环次数/尝试机会
@@ -33,7 +42,19 @@ from openai import OpenAI
 os.environ["http_proxy"] = http_proxy
 os.environ["https_proxy"] = https_proxy
 
-# 在文件顶部添加一个通用的流式处理助手函数
+def parse_ark_response(response):
+    if hasattr(response, 'output_text') and response.output_text:
+        return response.output_text
+    if hasattr(response, 'output') and isinstance(response.output, list):
+        for item in response.output:
+            if hasattr(item, 'type') and item.type == 'output_text':
+                if hasattr(item, 'text'):
+                    return item.text
+                if hasattr(item, 'content'):
+                    return item.content
+    return str(response)
+
+
 def handle_stream_response(client, model, messages, extra_body=None):
     """处理流式和非流式响应的通用助手函数
     
@@ -46,81 +67,90 @@ def handle_stream_response(client, model, messages, extra_body=None):
     返回:
         模型的响应文本
     """
-    # 获取全局模型设置
     global use_model
     model = use_model
     
-    # 添加默认extra_body
     if extra_body is None:
         extra_body = {}
     
-    # 对于qwen模型，添加enable_thinking参数
-    if model.startswith("qwen"):
-        extra_body["enable_thinking"] = False
-    
-    # 检查是否使用流式输出
-    if model == "qwen3-235b-a22b":
-        # 流式输出
-        response_content = ""
-        response_stream = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            stream=True,
+    if use_model == "ark":
+        response = client.responses.create(
+            model=ark_model,
+            input=messages,
             extra_body=extra_body
         )
-        
-        # 收集流式响应
-        for chunk in response_stream:
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                response_content += chunk.choices[0].delta.content
-        
-        return response_content
+        return parse_ark_response(response)
     else:
-        # 非流式输出
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            extra_body=extra_body
-        )
+        if model.startswith("qwen"):
+            extra_body["enable_thinking"] = False
         
-        return response.choices[0].message.content
+        if model == "qwen3-235b-a22b":
+            response_content = ""
+            response_stream = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                stream=True,
+                extra_body=extra_body
+            )
+            
+            for chunk in response_stream:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    response_content += chunk.choices[0].delta.content
+            
+            return response_content
+        else:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                extra_body=extra_body
+            )
+            
+            return response.choices[0].message.content
 
 class Actor:
     def __init__(self, name, age, gender, memory_path=None):
+        global use_model
+        
         self.name = name
         self.age = age
         self.gender = gender
-        self.embedding_dim = 1536  # OpenAI embedding维度
+        self.embedding_dim = ark_embedding_dim if use_model == "ark" else 1536
         self.memories = []
         self.memory_embeddings = None
         self.index = None
         self.relationships = {}  # 存储与其他Actor的关系
         self.traits = []  # 存储角色的性格特征
         
-        # 创建两个不同的客户端
-        self.embedding_client = OpenAI(
-            api_key=openai_api_key,
-            base_url="https://api.openai.com/v1"  # OpenAI的官方API端点
-        )
-        
-        # 使用全局use_model变量
-        global use_model
-        
-        if use_model == "gpt-4o-mini":
+        if use_model == "ark":
             self.talk_client = OpenAI(
+                api_key=ark_api_key,
+                base_url=ark_base_url
+            )
+            self.embedding_client = OpenAI(
+                api_key=ark_api_key,
+                base_url=ark_base_url
+            )
+        else:
+            self.embedding_client = OpenAI(
                 api_key=openai_api_key,
                 base_url="https://api.openai.com/v1"  # OpenAI的官方API端点
             )
-        elif use_model == "deepseek-chat":
-            self.talk_client = OpenAI(
-                api_key=deepseek_api_key,
-                base_url="https://api.deepseek.com/v1"  # Deepseek的API端点
-            )
-        elif use_model == "qwen3-235b-a22b":
-            self.talk_client = OpenAI(
-                api_key=qwen_api_key,
-                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"  # Qwen的API端点
-            )
+            
+            if use_model == "gpt-4o-mini":
+                self.talk_client = OpenAI(
+                    api_key=openai_api_key,
+                    base_url="https://api.openai.com/v1"  # OpenAI的官方API端点
+                )
+            elif use_model == "deepseek-chat":
+                self.talk_client = OpenAI(
+                    api_key=deepseek_api_key,
+                    base_url="https://api.deepseek.com/v1"  # Deepseek的API端点
+                )
+            elif use_model == "qwen3-235b-a22b":
+                self.talk_client = OpenAI(
+                    api_key=qwen_api_key,
+                    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"  # Qwen的API端点
+                )
         
         self._initialize_memory(memory_path)
     
@@ -158,12 +188,28 @@ class Actor:
         return len(self.memories) - 1
     
     def _get_embedding(self, text: str) -> np.ndarray:
-        """获取文本的向量嵌入，使用OpenAI的API"""
-        response = self.embedding_client.embeddings.create(
-            model="text-embedding-ada-002",
-            input=text
-        )
-        return np.array(response.data[0].embedding, dtype=np.float32)
+        if use_model == "ark":
+            try:
+                response = self.embedding_client.embeddings.create(
+                    model=ark_embedding_model,
+                    input=text
+                )
+                return np.array(response.data[0].embedding, dtype=np.float32)
+            except Exception as e:
+                print(f"火山方舟Embedding API调用失败: {str(e)}")
+                np.random.seed(hash(text) % 4294967295)
+                return np.random.rand(self.embedding_dim).astype(np.float32)
+        else:
+            try:
+                response = self.embedding_client.embeddings.create(
+                    model="text-embedding-ada-002",
+                    input=text
+                )
+                return np.array(response.data[0].embedding, dtype=np.float32)
+            except Exception as e:
+                print(f"Embedding API调用失败，使用本地随机向量替代: {str(e)}")
+                np.random.seed(hash(text) % 4294967295)
+                return np.random.rand(self.embedding_dim).astype(np.float32)
     
     def retrieve_relevant_memories(self, query: str, k: int = 3) -> List[str]:
         """检索与查询相关的记忆"""
@@ -404,10 +450,14 @@ class Director:
         self.script = {}  # 存储剧本，按场景组织
         self.current_scene = None  # 当前场景
         
-        # 使用全局use_model变量
         global use_model
         
-        if use_model == "gpt-4o-mini":
+        if use_model == "ark":
+            self.client = OpenAI(
+                api_key=ark_api_key,
+                base_url=ark_base_url
+            )
+        elif use_model == "gpt-4o-mini":
             self.client = OpenAI(
                 api_key=openai_api_key,
                 base_url="https://api.openai.com/v1"  # OpenAI的官方API端点
@@ -936,11 +986,14 @@ class Player:
 class Screenwriter:
     def __init__(self):
         """初始化编剧"""
-        # 创建OpenAI客户端
-        # 使用全局use_model变量
         global use_model
         
-        if use_model == "gpt-4o-mini":
+        if use_model == "ark":
+            self.client = OpenAI(
+                api_key=ark_api_key,
+                base_url=ark_base_url
+            )
+        elif use_model == "gpt-4o-mini":
             self.client = OpenAI(
                 api_key=openai_api_key,
                 base_url="https://api.openai.com/v1"

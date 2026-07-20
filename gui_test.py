@@ -3,18 +3,27 @@ from tkinter import scrolledtext, ttk, messagebox
 import threading
 import sys
 import io
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # API key configuration
 openai_api_key = "<Your-API-KEY>"
 deepseek_api_key = "<Your-API-KEY>"
 qwen_api_key = "<Your-API-KEY>"
+ark_api_key = os.getenv("ARK_API_KEY", "<Your-Ark-API-KEY>")
+ark_base_url = os.getenv("API_URL", "https://ark.cn-beijing.volces.com/api/plan/v3")
+ark_model = "deepseek-v4-pro"
+ark_embedding_model = "doubao-embedding-vision"
+ark_embedding_dim = 2048
 
 # Proxy configuration
-http_proxy = "http://localhost:7890"
-https_proxy = "http://localhost:7890"
+http_proxy = ""
+https_proxy = ""
 
 # Model configuration
-use_model = "deepseek-chat"  # Optional: "gpt-4o-mini", "deepseek-chat", "qwen3-235b-a22b"
+use_model = "ark"  # Optional: "gpt-4o-mini", "deepseek-chat", "qwen3-235b-a22b", "ark"
 
 # Test configuration
 try_chance = 2  # Number of scenario loops/attempts
@@ -34,7 +43,19 @@ os.environ["http_proxy"] = http_proxy
 os.environ["https_proxy"] = https_proxy
 
 
-# Add a general streaming processing helper function at the top of the file
+def parse_ark_response(response):
+    if hasattr(response, 'output_text') and response.output_text:
+        return response.output_text
+    if hasattr(response, 'output') and isinstance(response.output, list):
+        for item in response.output:
+            if hasattr(item, 'type') and item.type == 'output_text':
+                if hasattr(item, 'text'):
+                    return item.text
+                if hasattr(item, 'content'):
+                    return item.content
+    return str(response)
+
+
 def handle_stream_response(client, model, messages, extra_body=None):
     """General helper function to handle streaming and non-streaming responses
 
@@ -47,82 +68,91 @@ def handle_stream_response(client, model, messages, extra_body=None):
     Returns:
         Response text from the model
     """
-    # Get the global model setting
     global use_model
     model = use_model
 
-    # Add default extra_body
     if extra_body is None:
         extra_body = {}
 
-    # For Qwen models, add the enable_thinking parameter
-    if model.startswith("qwen"):
-        extra_body["enable_thinking"] = False
-
-    # Check if streaming output is used
-    if model == "qwen3-235b-a22b":
-        # Streaming output
-        response_content = ""
-        response_stream = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            stream=True,
+    if use_model == "ark":
+        response = client.responses.create(
+            model=ark_model,
+            input=messages,
             extra_body=extra_body
         )
-
-        # Collect streaming responses
-        for chunk in response_stream:
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                response_content += chunk.choices[0].delta.content
-
-        return response_content
+        return parse_ark_response(response)
     else:
-        # Non-streaming output
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            extra_body=extra_body
-        )
+        if model.startswith("qwen"):
+            extra_body["enable_thinking"] = False
 
-        return response.choices[0].message.content
+        if model == "qwen3-235b-a22b":
+            response_content = ""
+            response_stream = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                stream=True,
+                extra_body=extra_body
+            )
+
+            for chunk in response_stream:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    response_content += chunk.choices[0].delta.content
+
+            return response_content
+        else:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                extra_body=extra_body
+            )
+
+            return response.choices[0].message.content
 
 
 class Actor:
     def __init__(self, name, age, gender, memory_path=None):
+        global use_model
+        
         self.name = name
         self.age = age
         self.gender = gender
-        self.embedding_dim = 1536  # OpenAI embedding dimension
+        self.embedding_dim = ark_embedding_dim if use_model == "ark" else 1536
         self.memories = []
         self.memory_embeddings = None
         self.index = None
         self.relationships = {}  # Store relationships with other Actors
         self.traits = []  # Store character traits
 
-        # Create two different clients
-        self.embedding_client = OpenAI(
-            api_key=openai_api_key,
-            base_url="https://api.openai.com/v1"  # OpenAI's official API endpoint
-        )
-
-        # Use the global use_model variable
-        global use_model
-
-        if use_model == "gpt-4o-mini":
+        if use_model == "ark":
             self.talk_client = OpenAI(
+                api_key=ark_api_key,
+                base_url=ark_base_url
+            )
+            self.embedding_client = OpenAI(
+                api_key=ark_api_key,
+                base_url=ark_base_url
+            )
+        else:
+            self.embedding_client = OpenAI(
                 api_key=openai_api_key,
                 base_url="https://api.openai.com/v1"  # OpenAI's official API endpoint
             )
-        elif use_model == "deepseek-chat":
-            self.talk_client = OpenAI(
-                api_key=deepseek_api_key,
-                base_url="https://api.deepseek.com/v1"  # Deepseek's API endpoint
-            )
-        elif use_model == "qwen3-235b-a22b":
-            self.talk_client = OpenAI(
-                api_key=qwen_api_key,
-                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"  # Qwen's API endpoint
-            )
+
+            if use_model == "gpt-4o-mini":
+                self.talk_client = OpenAI(
+                    api_key=openai_api_key,
+                    base_url="https://api.openai.com/v1"  # OpenAI's official API endpoint
+                )
+            elif use_model == "deepseek-chat":
+                self.talk_client = OpenAI(
+                    api_key=deepseek_api_key,
+                    base_url="https://api.deepseek.com/v1"  # Deepseek's API endpoint
+                )
+            elif use_model == "qwen3-235b-a22b":
+                self.talk_client = OpenAI(
+                    api_key=qwen_api_key,
+                    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"  # Qwen's API endpoint
+                )
 
         self._initialize_memory(memory_path)
 
@@ -160,12 +190,28 @@ class Actor:
         return len(self.memories) - 1
 
     def _get_embedding(self, text: str) -> np.ndarray:
-        """Get the vector embedding of the text using OpenAI's API"""
-        response = self.embedding_client.embeddings.create(
-            model="text-embedding-ada-002",
-            input=text
-        )
-        return np.array(response.data[0].embedding, dtype=np.float32)
+        if use_model == "ark":
+            try:
+                response = self.embedding_client.embeddings.create(
+                    model=ark_embedding_model,
+                    input=text
+                )
+                return np.array(response.data[0].embedding, dtype=np.float32)
+            except Exception as e:
+                print(f"火山方舟Embedding API调用失败: {str(e)}")
+                np.random.seed(hash(text) % 4294967295)
+                return np.random.rand(self.embedding_dim).astype(np.float32)
+        else:
+            try:
+                response = self.embedding_client.embeddings.create(
+                    model="text-embedding-ada-002",
+                    input=text
+                )
+                return np.array(response.data[0].embedding, dtype=np.float32)
+            except Exception as e:
+                print(f"Embedding API调用失败，使用本地随机向量替代: {str(e)}")
+                np.random.seed(hash(text) % 4294967295)
+                return np.random.rand(self.embedding_dim).astype(np.float32)
 
     def retrieve_relevant_memories(self, query: str, k: int = 3) -> List[str]:
         """Retrieve memories relevant to the query"""
@@ -410,10 +456,14 @@ class Director:
         self.script = {}  # Store the script, organized by scenario
         self.current_scene = None  # Current scenario
 
-        # Use the global use_model variable
         global use_model
 
-        if use_model == "gpt-4o-mini":
+        if use_model == "ark":
+            self.client = OpenAI(
+                api_key=ark_api_key,
+                base_url=ark_base_url
+            )
+        elif use_model == "gpt-4o-mini":
             self.client = OpenAI(
                 api_key=openai_api_key,
                 base_url="https://api.openai.com/v1"  # OpenAI's official API endpoint
@@ -951,11 +1001,14 @@ class Player:
 class Screenwriter:
     def __init__(self):
         """Initialize the screenwriter."""
-        # Create an OpenAI client.
-        # Use the global use_model variable.
         global use_model
 
-        if use_model == "gpt-4o-mini":
+        if use_model == "ark":
+            self.client = OpenAI(
+                api_key=ark_api_key,
+                base_url=ark_base_url
+            )
+        elif use_model == "gpt-4o-mini":
             self.client = OpenAI(
                 api_key=openai_api_key,
                 base_url="https://api.openai.com/v1"

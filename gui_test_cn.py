@@ -4,45 +4,32 @@ import threading
 import sys
 import io
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# API密钥配置
-openai_api_key = "<Your-API-KEY>"
-deepseek_api_key = "<Your-API-KEY>"
-qwen_api_key = "<Your-API-KEY>"
-ark_api_key = os.getenv("ARK_API_KEY", "<Your-Ark-API-KEY>")
-ark_base_url = os.getenv("API_URL", "https://ark.cn-beijing.volces.com/api/plan/v3")
-ark_model = "deepseek-v4-pro"
-ark_embedding_model = "doubao-embedding-vision"
-ark_embedding_dim = 2048
-
-# 代理配置
-http_proxy = ""
-https_proxy = ""
-
-# 模型配置
-use_model = "ark"  # 可选: "gpt-4o-mini", "deepseek-chat", "qwen3-235b-a22b", "ark"
-
-# 测试配置
-try_chance = 2  # 场景循环次数/尝试机会
-max_new_scene_generations = 1  # 最大允许生成的新场景数 
-max_inserted_scenes = 1  # 最大允许插入的新场景数
-
 import openai
 import faiss
 import numpy as np
 from typing import List, Dict, Tuple
 import pickle
-import os
 from openai import OpenAI
+from config import ark_api_key, ark_base_url, ark_model, ark_embedding_model, ark_embedding_dim, openai_api_key, deepseek_api_key, qwen_api_key, http_proxy, https_proxy, use_model, try_chance, max_new_scene_generations, max_inserted_scenes
 
-# 设置代理
+# 设置代理环境变量
+# 火山方舟作为国内API通常不需要代理
 os.environ["http_proxy"] = http_proxy
 os.environ["https_proxy"] = https_proxy
 
 def parse_ark_response(response):
+    """解析火山方舟API的响应，提取文本内容
+
+    火山方舟API的响应格式与OpenAI不同，可能返回两种格式：
+    1. response.output_text 直接包含文本内容
+    2. response.output 列表中包含多个item，需要遍历找到type为'output_text'的项
+
+    Args:
+        response: 火山方舟API返回的响应对象
+
+    Returns:
+        str: 提取出的文本内容，如果无法解析则返回响应对象的字符串表示
+    """
     if hasattr(response, 'output_text') and response.output_text:
         return response.output_text
     if hasattr(response, 'output') and isinstance(response.output, list):
@@ -108,6 +95,25 @@ def handle_stream_response(client, model, messages, extra_body=None):
             return response.choices[0].message.content
 
 class Actor:
+    """演员类，代表戏剧中的一个角色
+
+    Actor类负责管理角色的记忆系统、性格特征和社交关系，
+    并根据这些信息生成符合角色设定的对话回应。
+
+    Attributes:
+        name: 角色名称
+        age: 角色年龄
+        gender: 角色性别
+        embedding_dim: 向量维度，根据使用的模型类型确定
+        memories: 记忆文本列表
+        memory_embeddings: 记忆向量矩阵（FAISS索引使用）
+        index: FAISS向量索引，用于快速检索相关记忆
+        relationships: 与其他角色的关系字典
+        traits: 性格特征列表
+        talk_client: 对话API客户端
+        embedding_client: 向量API客户端
+    """
+
     def __init__(self, name, age, gender, memory_path=None):
         global use_model
         
@@ -444,6 +450,21 @@ class Actor:
         return None
 
 class Director:
+    """导演类，负责管理剧本、演员和场景切换
+
+    Director类协调整个戏剧的流程，包括：
+    - 管理演员列表和剧本数据
+    - 生成新角色信息
+    - 判断场景是否应该继续或切换
+    - 为演员提供表演指导
+
+    Attributes:
+        actors: 演员字典，键为演员名称
+        script: 剧本字典，按场景组织
+        current_scene: 当前场景ID
+        client: API客户端实例
+    """
+
     def __init__(self):
         """初始化导演"""
         self.actors = {}  # 使用字典存储演员，键为演员名称
@@ -984,6 +1005,22 @@ class Player:
         return self.name
 
 class Screenwriter:
+    """编剧类，负责剧本生成和场景转换
+
+    Screenwriter类处理：
+    - 加载和管理剧本数据
+    - 生成详细场景描述
+    - 记录对话历史
+    - 根据对话历史生成新场景
+    - 处理场景转换描述
+
+    Attributes:
+        client: API客户端实例
+        dialogue_history: 对话历史列表
+        scene_descriptions: 场景描述字典
+        initial_script: 初始剧本字典
+    """
+
     def __init__(self):
         """初始化编剧"""
         global use_model
@@ -1692,38 +1729,82 @@ class Screenwriter:
             return json_response
 
 class StdoutRedirector:
+    """将标准输出重定向到Tkinter文本组件，实现实时日志显示
+
+    该类捕获stdout输出并显示在Tkinter Text组件中，
+    实现GUI界面中的实时日志功能。
+
+    Attributes:
+        text_widget: 目标Tkinter Text组件
+        buffer: 内部缓冲区，用于累积输出内容
+    """
+
     def __init__(self, text_widget):
+        """使用目标文本组件初始化重定向器
+
+        Args:
+            text_widget: 用于显示stdout的Tkinter Text组件
+        """
         self.text_widget = text_widget
         self.buffer = ""
 
     def write(self, string):
+        """将字符串写入文本组件并自动滚动到末尾
+
+        Args:
+            string: 要写入的文本
+        """
         self.buffer += string
         self.text_widget.insert(tk.END, string)
         self.text_widget.see(tk.END)
 
     def flush(self):
+        """文件类接口所需的flush方法"""
         pass
 
 class SettingsDialog:
+    """游戏设置对话框，用于配置模型和场景参数
+
+    该对话框允许用户配置：
+    - AI模型选择（OpenAI、DeepSeek、Qwen）
+    - 每场景尝试次数
+    - 最大插入场景数
+    - 最大新场景生成数
+
+    Attributes:
+        parent: 父Tkinter窗口
+        dialog: Toplevel对话框窗口
+        model_var: 选中模型的StringVar
+        try_chance_var: 场景尝试次数的IntVar
+        max_inserted_scenes_var: 最大插入场景数的IntVar
+        max_new_scene_generations_var: 最大新场景生成数的IntVar
+        result: 存储用户设置的字典
+    """
+
     def __init__(self, parent):
+        """初始化设置对话框
+
+        Args:
+            parent: 父Tkinter窗口
+        """
         self.parent = parent
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("游戏设置")
-        self.dialog.geometry("500x450")  # 调整合适的大小
+        self.dialog.geometry("500x450")
         self.dialog.configure(bg="#1e1e2e")
         self.dialog.transient(parent)
         self.dialog.grab_set()
         
-        # 设置变量
+        # 使用当前值初始化设置变量
         self.model_var = tk.StringVar(value=use_model)
         self.try_chance_var = tk.IntVar(value=try_chance)
         self.max_inserted_scenes_var = tk.IntVar(value=max_inserted_scenes)
         self.max_new_scene_generations_var = tk.IntVar(value=max_new_scene_generations)
         
-        # 创建设置界面
+        # 创建UI组件
         self.create_widgets()
         
-        # 返回值初始化
+        # 使用默认值初始化结果
         self.result = {
             "model": use_model,
             "try_chance": try_chance,
@@ -1731,7 +1812,7 @@ class SettingsDialog:
             "max_new_scene_generations": max_new_scene_generations
         }
         
-        # 确保对话框显示在父窗口中心
+        # 使对话框居中显示在父窗口上
         self.dialog.update_idletasks()
         width = self.dialog.winfo_width()
         height = self.dialog.winfo_height()
@@ -1739,13 +1820,13 @@ class SettingsDialog:
         y = parent.winfo_rooty() + (parent.winfo_height() - height) // 2
         self.dialog.geometry(f'{width}x{height}+{x}+{y}')
         
-        # 强制在初始化后刷新窗口
+        # 强制窗口刷新
         self.dialog.update()
         
-        # 设置窗口最小大小，防止内容被裁剪
+        # 设置窗口最小大小
         self.dialog.minsize(400, 300)
         
-        # 阻止窗口被关闭时游戏继续（必须通过按钮关闭）
+        # 处理窗口关闭事件
         self.dialog.protocol("WM_DELETE_WINDOW", self.on_cancel)
         
     def create_widgets(self):
@@ -1845,7 +1926,42 @@ class SettingsDialog:
         return self.result
 
 class CoCGameGUI:
+    """克苏鲁的呼唤互动游戏主GUI类
+
+    该类管理整个游戏界面和游戏流程，包括：
+    - 显示设置对话框进行配置
+    - 创建UI元素（场景描述、角色列表、动作按钮）
+    - 处理玩家交互（对话、环境互动）
+    - 管理场景转换和进度
+    - 退出时导出对话历史
+
+    Attributes:
+        root: 主Tkinter窗口
+        settings: 游戏配置设置
+        current_scene_index: 当前场景在script_ids中的索引
+        script_ids: 场景ID列表
+        scene_finished: 表示当前场景是否结束的标志
+        should_exit_game: 表示游戏是否应该退出的标志
+        last_interaction: 最后一次互动记录
+        inserted_scene_count: 插入场景计数
+        new_scene_generation_count: 新场景生成计数
+        characters: 当前场景可用角色列表
+        player: Player对象
+        director: Director对象
+        screenwriter: Screenwriter对象
+        scene_text: 场景显示的ScrolledText组件
+        character_listbox: 角色选择的Listbox组件
+        input_text: 玩家输入的Text组件
+        log_text: 游戏日志的ScrolledText组件
+        stdout_redirector: 日志显示的StdoutRedirector实例
+    """
+
     def __init__(self, root):
+        """初始化游戏GUI
+
+        Args:
+            root: 主Tkinter窗口
+        """
         self.root = root
         self.root.title("克苏鲁的呼唤 - 互动游戏")
         self.root.geometry("1200x800")
@@ -1854,8 +1970,13 @@ class CoCGameGUI:
         # 在游戏初始化前显示设置对话框
         self.show_settings_dialog()
         
+        # 初始化游戏变量
         self.setup_variables()
+        
+        # 创建UI元素
         self.create_ui()
+        
+        # 在后台线程中启动游戏初始化
         self.initialize_game()
         
     def show_settings_dialog(self):

@@ -4,46 +4,33 @@ import threading
 import sys
 import io
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# API key configuration
-openai_api_key = "<Your-API-KEY>"
-deepseek_api_key = "<Your-API-KEY>"
-qwen_api_key = "<Your-API-KEY>"
-ark_api_key = os.getenv("ARK_API_KEY", "<Your-Ark-API-KEY>")
-ark_base_url = os.getenv("API_URL", "https://ark.cn-beijing.volces.com/api/plan/v3")
-ark_model = "deepseek-v4-pro"
-ark_embedding_model = "doubao-embedding-vision"
-ark_embedding_dim = 2048
-
-# Proxy configuration
-http_proxy = ""
-https_proxy = ""
-
-# Model configuration
-use_model = "ark"  # Optional: "gpt-4o-mini", "deepseek-chat", "qwen3-235b-a22b", "ark"
-
-# Test configuration
-try_chance = 2  # Number of scenario loops/attempts
-max_new_scene_generations = 1  # Maximum number of new scenarios allowed to be generated
-max_inserted_scenes = 1  # Maximum number of new scenarios allowed to be inserted
-
 import openai
 import faiss
 import numpy as np
 from typing import List, Dict, Tuple
 import pickle
-import os
 from openai import OpenAI
+from config import ark_api_key, ark_base_url, ark_model, ark_embedding_model, ark_embedding_dim, openai_api_key, deepseek_api_key, qwen_api_key, http_proxy, https_proxy, use_model, try_chance, max_new_scene_generations, max_inserted_scenes
 
-# Set proxy
+# Set proxy environment variables
+# Volcano Ark is a domestic API and typically doesn't require a proxy
 os.environ["http_proxy"] = http_proxy
 os.environ["https_proxy"] = https_proxy
 
 
 def parse_ark_response(response):
+    """Parse Ark API response and extract text content
+
+    Ark API response format differs from OpenAI, may return in two formats:
+    1. response.output_text directly contains text content
+    2. response.output list contains multiple items, need to find item with type='output_text'
+
+    Args:
+        response: Ark API response object
+
+    Returns:
+        str: Extracted text content, or string representation of response if parsing fails
+    """
     if hasattr(response, 'output_text') and response.output_text:
         return response.output_text
     if hasattr(response, 'output') and isinstance(response.output, list):
@@ -110,6 +97,25 @@ def handle_stream_response(client, model, messages, extra_body=None):
 
 
 class Actor:
+    """Actor class representing a character in the drama
+
+    The Actor class manages the character's memory system, personality traits, and social relationships,
+    and generates character-appropriate dialogue responses based on these information.
+
+    Attributes:
+        name: Character name
+        age: Character age
+        gender: Character gender
+        embedding_dim: Vector dimension, determined by the model type
+        memories: List of memory texts
+        memory_embeddings: Memory vector matrix (used for FAISS index)
+        index: FAISS vector index for fast memory retrieval
+        relationships: Dictionary of relationships with other characters
+        traits: List of character traits
+        talk_client: Dialogue API client
+        embedding_client: Embedding API client
+    """
+
     def __init__(self, name, age, gender, memory_path=None):
         global use_model
         
@@ -450,6 +456,21 @@ class Actor:
 
 
 class Director:
+    """Director class responsible for managing scripts, actors, and scene transitions
+
+    The Director class coordinates the entire drama flow, including:
+    - Managing actor list and script data
+    - Generating new character information
+    - Determining whether scenes should continue or transition
+    - Providing performance guidance for actors
+
+    Attributes:
+        actors: Dictionary of actors, keyed by actor name
+        script: Script dictionary, organized by scene
+        current_scene: Current scene ID
+        client: API client instance
+    """
+
     def __init__(self):
         """Initialize the director"""
         self.actors = {}  # Use a dictionary to store actors, with the actor name as the key
@@ -999,6 +1020,22 @@ class Player:
 
 
 class Screenwriter:
+    """Screenwriter class responsible for script generation and scene transitions
+
+    The Screenwriter class handles:
+    - Loading and managing script data
+    - Generating detailed scene descriptions
+    - Recording dialogue history
+    - Generating new scenes based on dialogue history
+    - Handling scene transition descriptions
+
+    Attributes:
+        client: API client instance
+        dialogue_history: List of dialogue history records
+        scene_descriptions: Dictionary of scene descriptions
+        initial_script: Initial script dictionary
+    """
+
     def __init__(self):
         """Initialize the screenwriter."""
         global use_model
@@ -1707,39 +1744,83 @@ Please ensure:
             return json_response
 
 class StdoutRedirector:
+    """Redirects stdout to a Tkinter text widget for real-time log display
+
+    This class captures stdout output and displays it in a Tkinter Text widget,
+    enabling real-time logging in the GUI interface.
+
+    Attributes:
+        text_widget: Target Tkinter Text widget for output
+        buffer: Internal buffer for accumulating output
+    """
+
     def __init__(self, text_widget):
+        """Initialize the redirector with a target text widget
+
+        Args:
+            text_widget: Tkinter Text widget to display stdout
+        """
         self.text_widget = text_widget
         self.buffer = ""
 
     def write(self, string):
+        """Write string to the text widget and auto-scroll to end
+
+        Args:
+            string: Text to write
+        """
         self.buffer += string
         self.text_widget.insert(tk.END, string)
         self.text_widget.see(tk.END)
 
     def flush(self):
+        """Flush method required by file-like interface"""
         pass
 
 
 class SettingsDialog:
+    """Game settings dialog for configuring model and scene parameters
+
+    This dialog allows users to configure:
+    - AI model selection (OpenAI, DeepSeek, Qwen)
+    - Number of attempts per scene
+    - Maximum number of inserted scenes
+    - Maximum number of generated new scenes
+
+    Attributes:
+        parent: Parent Tkinter window
+        dialog: Toplevel dialog window
+        model_var: StringVar for selected model
+        try_chance_var: IntVar for scene attempt count
+        max_inserted_scenes_var: IntVar for max inserted scenes
+        max_new_scene_generations_var: IntVar for max new scene generations
+        result: Dictionary to store user's settings
+    """
+
     def __init__(self, parent):
+        """Initialize the settings dialog
+
+        Args:
+            parent: Parent Tkinter window
+        """
         self.parent = parent
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Game Settings")
-        self.dialog.geometry("500x450")  # Adjust to appropriate size
+        self.dialog.geometry("500x450")
         self.dialog.configure(bg="#1e1e2e")
         self.dialog.transient(parent)
         self.dialog.grab_set()
 
-        # Set variables
+        # Initialize settings variables with current values
         self.model_var = tk.StringVar(value=use_model)
         self.try_chance_var = tk.IntVar(value=try_chance)
         self.max_inserted_scenes_var = tk.IntVar(value=max_inserted_scenes)
         self.max_new_scene_generations_var = tk.IntVar(value=max_new_scene_generations)
 
-        # Create the settings interface
+        # Create UI widgets
         self.create_widgets()
 
-        # Initialize the return value
+        # Initialize result with default values
         self.result = {
             "model": use_model,
             "try_chance": try_chance,
@@ -1747,7 +1828,7 @@ class SettingsDialog:
             "max_new_scene_generations": max_new_scene_generations
         }
 
-        # Ensure the dialog is displayed in the center of the parent window
+        # Center dialog on parent window
         self.dialog.update_idletasks()
         width = self.dialog.winfo_width()
         height = self.dialog.winfo_height()
@@ -1755,13 +1836,13 @@ class SettingsDialog:
         y = parent.winfo_rooty() + (parent.winfo_height() - height) // 2
         self.dialog.geometry(f'{width}x{height}+{x}+{y}')
 
-        # Force the window to refresh after initialization
+        # Force window refresh
         self.dialog.update()
 
-        # Set the minimum window size to prevent content from being cropped
+        # Set minimum window size
         self.dialog.minsize(400, 300)
 
-        # Prevent the game from continuing when the window is closed (must be closed via button)
+        # Handle window close event
         self.dialog.protocol("WM_DELETE_WINDOW", self.on_cancel)
 
     def create_widgets(self):
@@ -1861,17 +1942,57 @@ class SettingsDialog:
         return self.result
 
 class CoCGameGUI:
+    """Main GUI class for the Call of Cthulhu interactive game
+
+    This class manages the entire game interface and game flow, including:
+    - Displaying settings dialog for configuration
+    - Creating UI elements (scene description, character list, action buttons)
+    - Handling player interactions (dialogue, environment interaction)
+    - Managing scene transitions and progression
+    - Exporting dialogue history on exit
+
+    Attributes:
+        root: Main Tkinter window
+        settings: Game configuration settings
+        current_scene_index: Index of current scene in script_ids
+        script_ids: List of scene IDs
+        scene_finished: Flag indicating if current scene is finished
+        should_exit_game: Flag indicating if game should exit
+        last_interaction: Record of last interaction
+        inserted_scene_count: Count of inserted scenes
+        new_scene_generation_count: Count of generated new scenes
+        characters: List of available characters for current scene
+        player: Player object
+        director: Director object
+        screenwriter: Screenwriter object
+        scene_text: ScrolledText widget for scene display
+        character_listbox: Listbox widget for character selection
+        input_text: Text widget for player input
+        log_text: ScrolledText widget for game logs
+        stdout_redirector: StdoutRedirector instance for log display
+    """
+
     def __init__(self, root):
+        """Initialize the game GUI
+
+        Args:
+            root: Main Tkinter window
+        """
         self.root = root
         self.root.title("Call of Cthulhu - Interactive Game")
         self.root.geometry("1200x800")
         self.root.configure(bg="#1e1e2e")
 
-        # Show the settings dialog before game initialization
+        # Show settings dialog before game initialization
         self.show_settings_dialog()
 
+        # Initialize game variables
         self.setup_variables()
+
+        # Create UI elements
         self.create_ui()
+
+        # Start game initialization in background thread
         self.initialize_game()
 
     def show_settings_dialog(self):

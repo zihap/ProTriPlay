@@ -5,7 +5,21 @@ from typing import List, Dict, Tuple
 import pickle
 import os
 from openai import OpenAI
-from config import ark_api_key, ark_base_url, ark_model, ark_embedding_model, ark_embedding_dim, openai_api_key, deepseek_api_key, qwen_api_key, http_proxy, https_proxy, use_model
+from volcenginesdkarkruntime import Ark
+from typing_extensions import AnyStr
+from config import (
+    ark_api_key,
+    ark_base_url,
+    ark_model,
+    ark_embedding_model,
+    ark_embedding_dim,
+    openai_api_key,
+    deepseek_api_key,
+    qwen_api_key,
+    http_proxy,
+    https_proxy,
+    use_model,
+)
 
 # 配置网络代理环境变量
 # 火山方舟作为国内API通常不需要代理，设置为空字符串
@@ -16,9 +30,8 @@ os.environ["https_proxy"] = https_proxy
 def parse_ark_response(response):
     """解析火山方舟API的响应，提取文本内容
 
-    火山方舟API的响应格式与OpenAI不同，可能返回两种格式：
-    1. response.output_text 直接包含文本内容
-    2. response.output 列表中包含多个item，需要遍历找到type为'output_text'的项
+    火山方舟Responses API的响应格式为嵌套结构：
+    response.output -> type=="message" -> content -> type=="output_text" -> text
 
     Args:
         response: 火山方舟API返回的响应对象
@@ -26,19 +39,32 @@ def parse_ark_response(response):
     Returns:
         str: 提取出的文本内容，如果无法解析则返回响应对象的字符串表示
     """
-    # 优先尝试直接读取output_text属性
-    if hasattr(response, 'output_text') and response.output_text:
+    # 优先尝试直接读取output_text属性（兼容旧格式）
+    if hasattr(response, "output_text") and response.output_text:
         return response.output_text
-    
-    # 其次尝试从output列表中提取
-    if hasattr(response, 'output') and isinstance(response.output, list):
-        for item in response.output:
-            if hasattr(item, 'type') and item.type == 'output_text':
-                if hasattr(item, 'text'):
-                    return item.text
-                if hasattr(item, 'content'):
-                    return item.content
-    
+
+    # 标准格式：遍历output列表
+    if hasattr(response, "output") and isinstance(response.output, list):
+        for output_item in response.output:
+            # 查找type为message的项（包含实际回答内容）
+            if hasattr(output_item, "type") and output_item.type == "message":
+                # 检查是否有content字段
+                if hasattr(output_item, "content") and isinstance(output_item.content, list):
+                    for content_item in output_item.content:
+                        # 查找type为output_text的内容项
+                        if hasattr(content_item, "type") and content_item.type == "output_text":
+                            if hasattr(content_item, "text") and content_item.text:
+                                return content_item.text
+                            if hasattr(content_item, "content") and content_item.content:
+                                return content_item.content
+            
+            # 兼容旧格式：直接查找type为output_text的项
+            if hasattr(output_item, "type") and output_item.type == "output_text":
+                if hasattr(output_item, "text") and output_item.text:
+                    return output_item.text
+                if hasattr(output_item, "content") and output_item.content:
+                    return output_item.content
+
     # 如果以上方式都失败，返回响应的字符串表示作为兜底
     return str(response)
 
@@ -65,9 +91,7 @@ def handle_stream_response(client, model, messages, extra_body=None):
     if use_model == "ark":
         # 火山方舟使用responses.create接口，传入input参数
         response = client.responses.create(
-            model=ark_model,
-            input=messages,
-            extra_body=extra_body
+            model=ark_model, input=messages, extra_body=extra_body
         )
         return parse_ark_response(response)
     else:
@@ -75,25 +99,24 @@ def handle_stream_response(client, model, messages, extra_body=None):
         if use_model == "qwen3-235b-a22b":
             if use_model.startswith("qwen"):
                 extra_body["enable_thinking"] = False
-            
+
             # Qwen模型使用流式响应
             response_stream = client.chat.completions.create(
-                model=use_model,
-                messages=messages,
-                stream=True,
-                extra_body=extra_body
+                model=use_model, messages=messages, stream=True, extra_body=extra_body
             )
             response_content = ""
             for chunk in response_stream:
-                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                if (
+                    chunk.choices
+                    and chunk.choices[0].delta
+                    and chunk.choices[0].delta.content
+                ):
                     response_content += chunk.choices[0].delta.content
             return response_content
         else:
             # 其他模型使用非流式响应
             response = client.chat.completions.create(
-                model=use_model,
-                messages=messages,
-                extra_body=extra_body
+                model=use_model, messages=messages, extra_body=extra_body
             )
             return response.choices[0].message.content
 
@@ -101,14 +124,17 @@ def handle_stream_response(client, model, messages, extra_body=None):
 def get_ark_client():
     """创建火山方舟API客户端
 
-    使用配置文件中的ark_api_key和ark_base_url初始化OpenAI兼容客户端。
+    使用配置文件中的ark_api_key和ark_base_url初始化火山方舟官方SDK客户端。
+    使用Ark类替代OpenAI类，符合火山方舟官方API规范。
 
     Returns:
-        OpenAI: 配置好的火山方舟API客户端实例
+        Ark: 配置好的火山方舟API客户端实例
     """
-    return OpenAI(
+    return Ark(
         api_key=ark_api_key,
-        base_url=ark_base_url
+        base_url=ark_base_url,
+        timeout=1800,
+        max_retries=2
     )
 
 
@@ -121,29 +147,20 @@ def get_client():
     Returns:
         OpenAI: 配置好的API客户端实例
     """
-    if use_model == "gpt-4o-mini":
-        return OpenAI(
-            api_key=openai_api_key,
-            base_url="https://api.openai.com/v1"
-        )
+    if use_model == "ark":
+        return get_ark_client()
+    elif use_model == "gpt-4o-mini":
+        return OpenAI(api_key=openai_api_key, base_url="https://api.openai.com/v1")
     elif use_model == "deepseek-chat":
-        return OpenAI(
-            api_key=deepseek_api_key,
-            base_url="https://api.deepseek.com/v1"
-        )
+        return OpenAI(api_key=deepseek_api_key, base_url="https://api.deepseek.com/v1")
     elif use_model == "qwen3-235b-a22b":
         return OpenAI(
             api_key=qwen_api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
-    elif use_model == "ark":
-        return get_ark_client()
-    
-    # 默认返回OpenAI客户端
-    return OpenAI(
-        api_key=openai_api_key,
-        base_url="https://api.openai.com/v1"
-    )
+
+    # 默认返回Ark客户端
+    return get_ark_client()
 
 
 class Actor:
@@ -167,21 +184,14 @@ class Actor:
     """
 
     def __init__(self, name, age, gender, memory_path=None):
-        """初始化演员对象
-
-        Args:
-            name: 角色名称
-            age: 角色年龄
-            gender: 角色性别
-            memory_path: 记忆文件路径，用于加载已保存的记忆数据（可选）
-        """
+        """初始化演员对象"""
         self.name = name
         self.age = age
         self.gender = gender
-        
+
         # 根据模型类型选择向量维度
         self.embedding_dim = ark_embedding_dim if use_model == "ark" else 1536
-        
+
         self.memories = []
         self.memory_embeddings = None
         self.index = None
@@ -189,15 +199,8 @@ class Actor:
         self.traits = []
 
         # 根据模型类型初始化API客户端
-        if use_model == "ark":
-            self.talk_client = get_ark_client()
-            self.embedding_client = get_ark_client()
-        else:
-            self.embedding_client = OpenAI(
-                api_key=openai_api_key,
-                base_url="https://api.openai.com/v1"
-            )
-            self.talk_client = get_client()
+        self.talk_client = get_client()
+        self.embedding_client = get_client()
 
         # 初始化记忆系统
         self._initialize_memory(memory_path)
@@ -213,12 +216,12 @@ class Actor:
         """
         # 如果提供了文件路径且文件存在，加载记忆数据
         if memory_path and os.path.exists(memory_path):
-            with open(memory_path, 'rb') as f:
+            with open(memory_path, "rb") as f:
                 saved_data = pickle.load(f)
-                self.memories = saved_data.get('memories', [])
-                self.memory_embeddings = saved_data.get('embeddings')
-                self.relationships = saved_data.get('relationships', {})
-                self.traits = saved_data.get('traits', [])
+                self.memories = saved_data.get("memories", [])
+                self.memory_embeddings = saved_data.get("embeddings")
+                self.relationships = saved_data.get("relationships", {})
+                self.traits = saved_data.get("traits", [])
 
         # 如果没有加载到向量数据或记忆为空，初始化空向量矩阵
         if self.memory_embeddings is None or len(self.memories) == 0:
@@ -246,10 +249,10 @@ class Actor:
         """
         # 获取文本向量表示
         embedding = self._get_embedding(memory_text)
-        
+
         # 添加到记忆列表
         self.memories.append(memory_text)
-        
+
         # 更新向量矩阵
         if len(self.memories) == 1:
             self.memory_embeddings = embedding.reshape(1, -1)
@@ -259,7 +262,7 @@ class Actor:
         # 重建FAISS索引
         self.index.reset()
         self.index.add(self.memory_embeddings)
-        
+
         return len(self.memories) - 1
 
     def _get_embedding(self, text: str) -> np.ndarray:
@@ -278,8 +281,7 @@ class Actor:
             try:
                 # 使用火山方舟的doubao-embedding-vision模型
                 response = self.embedding_client.embeddings.create(
-                    model=ark_embedding_model,
-                    input=text
+                    model=ark_embedding_model, input=text
                 )
                 return np.array(response.data[0].embedding, dtype=np.float32)
             except Exception as e:
@@ -291,8 +293,7 @@ class Actor:
             try:
                 # 使用OpenAI的text-embedding-ada-002模型
                 response = self.embedding_client.embeddings.create(
-                    model="text-embedding-ada-002",
-                    input=text
+                    model="text-embedding-ada-002", input=text
                 )
                 return np.array(response.data[0].embedding, dtype=np.float32)
             except Exception as e:
@@ -319,7 +320,7 @@ class Actor:
         # 获取查询向量并进行搜索
         query_embedding = self._get_embedding(query).reshape(1, -1)
         scores, indices = self.index.search(query_embedding, min(k, len(self.memories)))
-        
+
         # 返回对应的记忆文本
         return [self.memories[idx] for idx in indices[0]]
 
@@ -330,7 +331,7 @@ class Actor:
         以便在生成对话时能够考虑角色的性格特点。
 
         Args:
-            trait_description: 性格特征描述，如"cautious"、"kind"等
+            trait_description: 性格特征描述，如"谨慎"、"善良"等
 
         Returns:
             int: 性格特征在列表中的索引位置
@@ -338,7 +339,7 @@ class Actor:
         if trait_description not in self.traits:
             self.traits.append(trait_description)
             # 将性格特征添加为记忆
-            self.add_memory(f"My character trait is {trait_description}")
+            self.add_memory(f"我的性格特点是{trait_description}")
         return len(self.traits) - 1
 
     def get_traits(self):
@@ -357,13 +358,16 @@ class Actor:
         Args:
             path: 保存文件的路径
         """
-        with open(path, 'wb') as f:
-            pickle.dump({
-                'memories': self.memories,
-                'embeddings': self.memory_embeddings,
-                'relationships': self.relationships,
-                'traits': self.traits
-            }, f)
+        with open(path, "wb") as f:
+            pickle.dump(
+                {
+                    "memories": self.memories,
+                    "embeddings": self.memory_embeddings,
+                    "relationships": self.relationships,
+                    "traits": self.traits,
+                },
+                f,
+            )
 
     def add_relationship(self, other_actor, relationship_type, description=""):
         """添加与其他角色的关系
@@ -373,11 +377,11 @@ class Actor:
 
         Args:
             other_actor: 另一个Actor对象或角色名称
-            relationship_type: 关系类型，如"friend"、"family"、"colleague"等
+            relationship_type: 关系类型，如"朋友"、"家人"、"同事"等
             description: 关系描述，提供更详细的关系信息（可选）
         """
         # 获取对方角色名称
-        other_name = other_actor.name if hasattr(other_actor, 'name') else other_actor
+        other_name = other_actor.name if hasattr(other_actor, "name") else other_actor
 
         # 初始化关系列表（如果不存在）
         if other_name not in self.relationships:
@@ -385,23 +389,22 @@ class Actor:
 
         # 检查是否已存在相同类型的关系，存在则更新
         for i, rel in enumerate(self.relationships[other_name]):
-            if rel['type'] == relationship_type:
+            if rel["type"] == relationship_type:
                 self.relationships[other_name][i] = {
-                    'type': relationship_type,
-                    'description': description
+                    "type": relationship_type,
+                    "description": description,
                 }
                 return
 
         # 添加新关系
-        self.relationships[other_name].append({
-            'type': relationship_type,
-            'description': description
-        })
+        self.relationships[other_name].append(
+            {"type": relationship_type, "description": description}
+        )
 
         # 将关系添加为记忆
-        memory_text = f"My relationship with {other_name} is {relationship_type}"
+        memory_text = f"我与{other_name}的关系是{relationship_type}"
         if description:
-            memory_text += f": {description}"
+            memory_text += f"：{description}"
         self.add_memory(memory_text)
 
     def get_relationship(self, other_actor):
@@ -413,7 +416,7 @@ class Actor:
         Returns:
             List[Dict]: 关系信息列表，每项包含'type'和'description'字段
         """
-        other_name = other_actor.name if hasattr(other_actor, 'name') else other_actor
+        other_name = other_actor.name if hasattr(other_actor, "name") else other_actor
         return self.relationships.get(other_name, [])
 
     def get_all_relationships(self):
@@ -436,31 +439,31 @@ class Actor:
             guidance: 导演提供的表演指导（可选）
 
         Returns:
-            str: 角色的对话回应，格式为"(角色表情与动作) 对话内容"
+            str: 角色的对话回应，格式为"（角色表情与动作）对话内容"
         """
         # 检索与当前对话相关的记忆
         relevant_memories = self.retrieve_relevant_memories(information)
 
         # 提取说话者名称
         speaker_name = speaker
-        if hasattr(speaker, 'name'):
+        if hasattr(speaker, "name"):
             speaker_name = speaker.name
 
         # 构建关系上下文
         relationship_context = ""
-        
+
         # 添加与当前说话者的关系
         if speaker_name and speaker_name in self.relationships:
             relationships = self.get_relationship(speaker_name)
             if relationships:
                 rel_texts = []
                 for rel in relationships:
-                    rel_type = rel['type']
-                    rel_desc = rel['description']
+                    rel_type = rel["type"]
+                    rel_desc = rel["description"]
                     if rel_desc:
-                        rel_text = f"Your relationship with {speaker_name} is {rel_type}: {rel_desc}"
+                        rel_text = f"你与{speaker_name}的关系是{rel_type}：{rel_desc}"
                     else:
-                        rel_text = f"Your relationship with {speaker_name} is {rel_type}"
+                        rel_text = f"你与{speaker_name}的关系是{rel_type}"
                     rel_texts.append(rel_text)
                 relationship_context += "\n".join(rel_texts) + "\n"
 
@@ -471,58 +474,70 @@ class Actor:
                 if relationships:
                     rel_texts = []
                     for rel in relationships:
-                        rel_type = rel['type']
-                        rel_desc = rel['description']
+                        rel_type = rel["type"]
+                        rel_desc = rel["description"]
                         if rel_desc:
-                            rel_text = f"Your relationship with {name} is {rel_type}: {rel_desc}"
+                            rel_text = f"你与{name}的关系是{rel_type}：{rel_desc}"
                         else:
-                            rel_text = f"Your relationship with {name} is {rel_type}"
+                            rel_text = f"你与{name}的关系是{rel_type}"
                         rel_texts.append(rel_text)
                     relationship_context += "\n".join(rel_texts) + "\n"
 
         # 构建性格特征上下文
         traits_context = ""
         if self.traits:
-            traits_context = "Your character traits are: " + ", ".join(self.traits) + ". Please shape your response based on these character traits.\n"
+            traits_context = (
+                "你的性格特征是："
+                + "，".join(self.traits)
+                + "。请根据这些性格特征来塑造你的回应。\n"
+            )
 
         # 整合所有上下文信息
         context = ""
         if relevant_memories or relationship_context or speaker_name or traits_context:
-            context = "Answer based on the following information:\n"
+            context = "根据以下信息回答：\n"
             if speaker_name:
-                context += f"The person talking to you is: {speaker_name}\n\n"
+                context += f"与你对话的人是：{speaker_name}\n\n"
             if relationship_context:
                 context += relationship_context + "\n"
             if traits_context:
                 context += traits_context + "\n"
             if relevant_memories:
                 context += "\n".join(relevant_memories) + "\n"
-            context += "\nQuestion: "
+            context += "\n问题："
 
         # 添加导演指导（如果有）
         if guidance:
-            context += "\nDirector's guidance: " + guidance
+            context += "\n导演指导：" + guidance
 
         # 将对话记录添加到记忆
         if speaker_name:
-            self.add_memory(f"{speaker_name} said to me: {information}")
+            self.add_memory(f"{speaker_name}对我说：{information}")
 
         # 构建API消息列表
         messages = [
-            {"role": "system", "content": f"You are a theater actor, and you are playing the role of {self.name}, a {self.age}-year-old {self.gender} in the play. Please make appropriate responses based on the identity of the conversationalist and your character traits.\n\nYour response must follow the following format: \"({self.name}'s expression and action) Conversation content\". The parentheses must contain the name of the character you are playing as the subject, clearly describe the expression and action, and the content after the parentheses should directly follow the conversation content. For example: \"({self.name} nervously clenches fists) I don't know what you're talking about.\" or \"({self.name} smiles and nods) I'm glad to see you.\""},
-            {"role": "user", "content": (context + information) if context else information}
+            {
+                "role": "system",
+                "content": f'你是一名戏剧演员，你在剧中扮演的角色叫{self.name}，一个{self.age}岁的{self.gender}。请根据对话者身份和你的角色特点做出合适的回应。\n\n你的回应必须按照以下格式："（{self.name}的表情与动作）对话内容"。括号内必须包含你扮演角色的名字作为主语，清晰描述表情和动作，括号后直接跟对话内容。例如："（{self.name}紧张地握紧拳头）我不知道你在说什么。"或"（{self.name}微笑着点头）我很高兴见到你。"',
+            },
+            {
+                "role": "user",
+                "content": (context + information) if context else information,
+            },
         ]
 
         # 调用API获取响应
         response_content = handle_stream_response(self.talk_client, use_model, messages)
 
         # 确保响应格式符合要求
-        if not response_content.startswith(f"({self.name}"):
-            response_content = f"({self.name} calmly says) {response_content}"
+        if not response_content.startswith(
+            f"（{self.name}"
+        ) and not response_content.startswith(f"({self.name}"):
+            response_content = f"（{self.name}平静地说道）{response_content}"
 
         # 将回应记录添加到记忆
         if speaker_name:
-            self.add_memory(f"I said to {speaker_name}: {response_content}")
+            self.add_memory(f"我对{speaker_name}说：{response_content}")
 
         return response_content
 
@@ -544,31 +559,34 @@ class Actor:
 
         # 提取说话者信息
         speaker_name = speaker
-        if hasattr(speaker, 'name'):
+        if hasattr(speaker, "name"):
             speaker_name = speaker.name
 
         # 构建判断提示
-        prompt = f"Scenario: {context}\n\n"
+        prompt = f"情境：{context}\n\n"
 
         if speaker_name:
-            prompt += f"Speaker: {speaker_name}\n\n"
+            prompt += f"说话者：{speaker_name}\n\n"
 
         if relevant_memories:
-            prompt += "Relevant memories:\n" + "\n".join(relevant_memories) + "\n\n"
+            prompt += "相关记忆：\n" + "\n".join(relevant_memories) + "\n\n"
 
-        prompt += f"As a character named {self.name}, do I need to speak in this situation? Please only answer 'Yes' or 'No', and give a brief reason."
+        prompt += f"作为一个名叫{self.name}的角色，在这种情况下，我需要说话吗？请只回答'是'或'否'，并给出简短理由。"
 
         # 构建消息列表
         messages = [
-            {"role": "system", "content": "You need to help the character determine if they should speak in the current situation. Please only answer 'Yes' or 'No', and give a brief reason."},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": "你需要帮助角色判断在当前情境下是否应该说话。请只回答'是'或'否'，并给出简短理由。",
+            },
+            {"role": "user", "content": prompt},
         ]
 
         # 获取判断结果
         decision = handle_stream_response(self.talk_client, use_model, messages)
 
         # 解析判断结果
-        should_speak = "Yes" in decision[:10] or "yes" in decision.lower()[:10]
+        should_speak = "是" in decision[:10] or "yes" in decision.lower()[:10]
 
         # 如果应该说话则执行speak方法
         if should_speak:
@@ -628,37 +646,40 @@ class Director:
         scene_desc = self.get_scene_description(scene_id)
 
         # 构建生成角色信息的prompt
-        prompt = f"""Based on the following scene description and character name, generate a complete character profile:
+        prompt = f"""根据以下场景描述和角色名称，生成一个完整的角色信息：
 
-Scene description: {scene_desc}
+场景描述：{scene_desc}
 
-Character name: {character_name}
+角色名称：{character_name}
 
-Player character name: {player_name}
+玩家角色名称：{player_name}
 
-Please generate character information including the following:
-1. Character age
-2. Character gender
-3. Character background story (3 - 5 items)
-4. Character traits (2 - 3 items)
-5. Relationship type and description with the player character "{player_name}"
+请生成包含以下内容的角色信息：
+1. 角色年龄
+2. 角色性别
+3. 角色背景故事（3-5条）
+4. 角色性格特征（2-3个）
+5. 与玩家角色"{player_name}"的关系类型和描述
 
-Please return the result in JSON format:
+请以JSON格式返回结果：
 {{
-    "age": number,
-    "gender": "gender",
-    "background": ["memory/background 1", "memory/background 2", ...],
-    "traits": ["trait 1", "trait 2", ...],
+    "age": 数字,
+    "gender": "性别",
+    "background": ["记忆/背景1", "记忆/背景2", ...],
+    "traits": ["性格特征1", "性格特征2", ...],
     "relationship": {{
-        "type": "relationship type",
-        "description": "relationship description"
+        "type": "关系类型",
+        "description": "关系描述"
     }}
 }}"""
 
         # 调用API生成角色信息
         messages = [
-            {"role": "system", "content": "You are an AI assistant creating characters. Generate character information that fits the scenario based on the scene and character name."},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": "你是一位创造角色的AI助手，根据场景和角色名称生成符合情境的角色信息。",
+            },
+            {"role": "user", "content": prompt},
         ]
 
         response = handle_stream_response(self.client, use_model, messages)
@@ -669,23 +690,20 @@ Please return the result in JSON format:
             import re
 
             # 提取JSON部分
-            json_match = re.search(r'\{[\s\S]*\}', response)
+            json_match = re.search(r"\{[\s\S]*\}", response)
             if json_match:
                 json_str = json_match.group(0)
                 return json.loads(json_str)
         except Exception as e:
-            print(f"Failed to parse character information: {str(e)}")
+            print(f"解析角色信息失败: {str(e)}")
 
         # 返回默认角色信息作为降级方案
         return {
             "age": 30,
-            "gender": "unknown",
-            "background": [f"I am {character_name}, a new character in the current scene"],
-            "traits": ["mysterious"],
-            "relationship": {
-                "type": "stranger",
-                "description": "Just met"
-            }
+            "gender": "未知",
+            "background": [f"我是{character_name}，在当前场景中新出现的角色"],
+            "traits": ["神秘"],
+            "relationship": {"type": "陌生人", "description": "刚刚相遇"},
         }
 
     def ensure_all_characters_exist(self, scene_id, player_name):
@@ -709,39 +727,55 @@ Please return the result in JSON format:
 
             # 如果角色不存在，创建新的Actor实例
             if character_name not in self.actors:
-                print(f"\nNew character found: {character_name}, using AI to generate character information...")
+                print(f"\n发现新角色: {character_name}，正在使用AI生成角色信息...")
 
                 # 使用AI生成角色信息
-                profile = self.generate_actor_profile(character_name, scene_id, player_name)
+                profile = self.generate_actor_profile(
+                    character_name, scene_id, player_name
+                )
 
                 # 创建Actor实例
-                new_actor = Actor(character_name, profile.get("age", 30), profile.get("gender", "unknown"))
+                new_actor = Actor(
+                    character_name,
+                    profile.get("age", 30),
+                    profile.get("gender", "未知"),
+                )
 
                 # 添加背景记忆
-                for memory in profile.get("background", [f"I am {character_name}, a new character in the current scene"]):
+                for memory in profile.get(
+                    "background", [f"我是{character_name}，在当前场景中新出现的角色"]
+                ):
                     new_actor.add_memory(memory)
 
                 # 添加性格特征
-                for trait in profile.get("traits", ["mysterious"]):
+                for trait in profile.get("traits", ["神秘"]):
                     new_actor.add_trait(trait)
 
                 # 添加与玩家角色的关系
-                relationship = profile.get("relationship", {"type": "stranger", "description": "Just met"})
+                relationship = profile.get(
+                    "relationship", {"type": "陌生人", "description": "刚刚相遇"}
+                )
                 new_actor.add_relationship(
                     player_name,
-                    relationship.get("type", "stranger"),
-                    relationship.get("description", "Just met")
+                    relationship.get("type", "陌生人"),
+                    relationship.get("description", "刚刚相遇"),
                 )
 
                 # 将新角色添加到导演管理中
                 self.add_actor(new_actor)
-                
-                # 输出创建信息
-                print(f"Character created: {character_name}, Age: {profile.get('age', 30)}, Gender: {profile.get('gender', 'unknown')}")
-                print(f"Character traits: {', '.join(profile.get('traits', ['mysterious']))}")
-                print(f"Relationship with player: {relationship.get('type', 'stranger')} - {relationship.get('description', 'Just met')}")
 
-    def check_and_create_new_characters(self, scene_ids, current_scene_index, player_name):
+                # 输出创建信息
+                print(
+                    f"已创建角色: {character_name}，年龄: {profile.get('age', 30)}，性别: {profile.get('gender', '未知')}"
+                )
+                print(f"性格特征: {', '.join(profile.get('traits', ['神秘']))}")
+                print(
+                    f"与玩家关系: {relationship.get('type', '陌生人')} - {relationship.get('description', '刚刚相遇')}"
+                )
+
+    def check_and_create_new_characters(
+        self, scene_ids, current_scene_index, player_name
+    ):
         """检查并创建新场景中可能出现的角色
 
         预先检查下一个场景的角色，确保在进入场景前所有角色都已创建。
@@ -827,9 +861,9 @@ Please return the result in JSON format:
         # 如果提供了player参数，排除玩家角色
         if player:
             player_name = player
-            if hasattr(player, 'get_player_name'):
+            if hasattr(player, "get_player_name"):
                 player_name = player.get_player_name()
-            elif hasattr(player, 'name'):
+            elif hasattr(player, "name"):
                 player_name = player.name
 
             characters = [char for char in characters if char != player_name]
@@ -850,7 +884,7 @@ Please return the result in JSON format:
         """
         # 验证场景和演员是否存在
         if self.current_scene is None or actor_name not in self.actors:
-            return "Unable to guide: Current scene not set or actor not found."
+            return "无法指导：未设置当前场景或演员未找到"
 
         # 获取场景信息
         scene_info = self.script.get(self.current_scene, {})
@@ -863,41 +897,46 @@ Please return the result in JSON format:
         # 获取演员信息
         actor = self.actors.get(actor_name)
         actor_traits = actor.get_traits() if hasattr(actor, "get_traits") else []
-        traits_text = ", ".join(actor_traits) if actor_traits else "No specific character traits."
+        traits_text = "，".join(actor_traits) if actor_traits else "无特定性格特征"
 
         # 构建指导prompt
-        prompt = f"""As a theater director, please provide acting guidance for the actor '{actor_name}' based on the following information:
+        prompt = f"""作为戏剧导演，请根据以下信息为演员'{actor_name}'提供表演指导：
 
-Scene description: {scene_desc}
+场景描述：{scene_desc}
 
-Actor's character traits: {traits_text}
+演员的性格特征：{traits_text}
 
-Player's recent speech: "{player_speech}"
+玩家刚才的发言："{player_speech}"
 
-Actor's lines:
+演员的台词：
 """
         for dialogue in actor_dialogues:
             prompt += f"- {dialogue.get('content')}\n"
 
         prompt += """
-Please analyze the intention, emotion, and possible implied meaning of the player's speech, and then provide specific acting guidance, including:
-1. Emotional expression suggestions
-2. Body language guidance
-3. Tone and rhythm suggestions
-4. Whether certain information should be revealed
-5. How to stay true to the character's traits
+请分析玩家发言的意图、情感和可能的隐含含义，然后提供具体的表演指导，包括：
+1. 情感表达建议
+2. 肢体语言指导
+3. 语调和节奏建议
+4. 是否应该透露某些信息
+5. 如何忠于角色性格特征
 
-Please directly provide the guidance content without any preamble:"""
+请直接给出指导内容，无需前置说明："""
 
         # 调用API生成指导
         messages = [
-            {"role": "system", "content": "You are an experienced theater director, good at analyzing the player's speech and providing response guidance for the actor."},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": "你是一位经验丰富的戏剧导演，擅长分析玩家发言并为演员提供回应指导。",
+            },
+            {"role": "user", "content": prompt},
         ]
 
         return handle_stream_response(self.client, use_model, messages)
 
-    def is_scene_continuing(self, last_dialogue, screenwriter=None, detailed_scene=None):
+    def is_scene_continuing(
+        self, last_dialogue, screenwriter=None, detailed_scene=None
+    ):
         """判断当前场景是否应该继续
 
         根据场景描述、对话历史和玩家目标，判断场景是否应该继续进行。
@@ -927,17 +966,24 @@ Please directly provide the guidance content without any preamble:"""
         # 优先使用传入的详细场景描述
         if detailed_scene:
             scene_description = detailed_scene
-        elif screenwriter and hasattr(screenwriter, 'scene_descriptions') and self.current_scene in screenwriter.scene_descriptions:
-            scene_description = screenwriter.scene_descriptions.get(self.current_scene, "")
+        elif (
+            screenwriter
+            and hasattr(screenwriter, "scene_descriptions")
+            and self.current_scene in screenwriter.scene_descriptions
+        ):
+            scene_description = screenwriter.scene_descriptions.get(
+                self.current_scene, ""
+            )
 
         # 使用正则表达式提取玩家目标
         if scene_description:
             import re
+
             goal_patterns = [
-                r"Player character goal description[：:](.*?)(?=\n\n|\Z)",
-                r"Player character goal[：:](.*?)(?=\n\n|\Z)",
-                r"Player goal[：:](.*?)(?=\n\n|\Z)",
-                r"4[\.。]\s*Player character goal[^：:]*[：:](.*?)(?=\n\n|\Z)"
+                r"玩家角色目标描述[：:](.*?)(?=\n\n|\Z)",
+                r"玩家角色目标[：:](.*?)(?=\n\n|\Z)",
+                r"玩家目标[：:](.*?)(?=\n\n|\Z)",
+                r"4[\.。]\s*玩家角色目标[^：:]*[：:](.*?)(?=\n\n|\Z)",
             ]
 
             for pattern in goal_patterns:
@@ -948,59 +994,73 @@ Please directly provide the guidance content without any preamble:"""
 
         # 获取对话历史
         recent_dialogue_history = ""
-        if screenwriter and hasattr(screenwriter, 'get_dialogue_history'):
+        if screenwriter and hasattr(screenwriter, "get_dialogue_history"):
             recent_dialogues = screenwriter.get_dialogue_history(limit=5)
             if recent_dialogues:
-                recent_dialogue_history = "\n\nRecent dialogue history:\n"
+                recent_dialogue_history = "\n\n最近的对话历史：\n"
                 for d in recent_dialogues:
-                    if 'record_type' in d:
-                        record_type = d['record_type']
-                        if record_type == "Dialogue" or record_type.startswith("Dialogue"):
-                            if 'target' in d:
-                                recent_dialogue_history += f"{d['speaker']} said to {d['target']}: {d['content']}\n"
+                    if "record_type" in d:
+                        record_type = d["record_type"]
+                        if record_type == "对话" or record_type.startswith("对"):
+                            if "target" in d:
+                                recent_dialogue_history += f"{d['speaker']} 对 {d['target']} 说：{d['content']}\n"
                             else:
-                                recent_dialogue_history += f"{d['speaker']} ({record_type}): {d['content']}\n"
+                                recent_dialogue_history += (
+                                    f"{d['speaker']} ({record_type})：{d['content']}\n"
+                                )
                         else:
-                            recent_dialogue_history += f"{d['speaker']} ({record_type}): {d['content']}\n"
+                            recent_dialogue_history += (
+                                f"{d['speaker']} ({record_type})：{d['content']}\n"
+                            )
                     else:
-                        recent_dialogue_history += f"{d['speaker']}: {d['content']}\n"
+                        recent_dialogue_history += f"{d['speaker']}：{d['content']}\n"
 
         # 构建判断prompt
-        prompt = f"Please analyze the following situation and determine if the script should continue in the current scene:\n\n"
-        prompt += f"Scene description: {scene_info.get('description', '')}\n\n"
+        prompt = f"请分析以下情况，判断剧本是否应该继续在当前场景：\n\n"
+        prompt += f"场景描述：{scene_info.get('description', '')}\n\n"
 
         if player_goal:
-            prompt += f"Player character's goal in this scene: {player_goal}\n\n"
+            prompt += f"玩家角色在本场景的目标：{player_goal}\n\n"
 
-        prompt += "Expected dialogue content:\n"
+        prompt += "预期对话内容:\n"
         for d in dialogues[-3:]:
             prompt += f"{d.get('character')}: {d.get('content')}\n"
 
         if recent_dialogue_history:
             prompt += recent_dialogue_history
         elif last_dialogue:
-            prompt += f"\nActual latest dialogue: {last_dialogue}\n"
+            prompt += f"\n实际最新对话：{last_dialogue}\n"
 
-        prompt += "\nBased on the following criteria, determine if the current scene should continue:\n"
-        prompt += "1. Whether the player character's goal has been achieved.\n"
-        prompt += "2. Whether the key dialogues in the scene have been completed.\n"
-        prompt += "3. Whether the dialogue has naturally reached an end point.\n"
-        prompt += "4. Whether there are obvious scene transition clues.\n\n"
-        prompt += "Especially note: The player character's goal is an important condition for determining if the scene should continue. If the goal has not been achieved and there are no obvious transition signals, the scene usually should continue.\n\n"
-        prompt += "Please clearly determine if the scene should continue. First answer 'Yes' or 'No', then give a brief reason."
+        prompt += "\n根据以下判断标准，确定当前场景是否应该继续：\n"
+        prompt += "1. 玩家角色的目标是否已经达成\n"
+        prompt += "2. 场景中的关键对话是否已经完成\n"
+        prompt += "3. 对话是否自然到达了一个结束点\n"
+        prompt += "4. 是否出现了明显的场景转换线索\n\n"
+        prompt += "特别注意：玩家角色的目标是判断场景是否应该继续的重要条件，如果目标尚未达成且无明显转场信号，场景通常应该继续。\n\n"
+        prompt += "请明确判断场景是否应该继续，先回答是或否，然后给出简短理由。"
 
         # 调用API进行判断
         messages = [
-            {"role": "system", "content": "You are an experienced theater director, good at analyzing scripts and performances. You need to determine if the current scene should continue or move on to the next scene."},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": "你是一位经验丰富的戏剧导演，擅长分析剧本和表演。你需要判断当前场景是否应该继续，还是应该转入下一个场景。",
+            },
+            {"role": "user", "content": prompt},
         ]
 
         result = handle_stream_response(self.client, use_model, messages).lower()
 
         # 判断结果
-        return "Yes" in result[:30] or "Should continue" in result[:30] or "Continue" in result[:30] or "Not achieved" in result[:50]
+        return (
+            "是" in result[:30]
+            or "应该继续" in result[:30]
+            or "继续" in result[:30]
+            or "未达成" in result[:50]
+        )
 
-    def should_generate_new_script(self, screenwriter, current_scene_id, next_scene_id=None):
+    def should_generate_new_script(
+        self, screenwriter, current_scene_id, next_scene_id=None
+    ):
         """判断是否需要在场景间插入新场景
 
         分析当前场景结束后的情节发展，判断是否需要生成过渡场景。
@@ -1021,12 +1081,14 @@ Please directly provide the guidance content without any preamble:"""
         recent_dialogues = screenwriter.get_dialogue_history(limit=10)
         dialogue_text = ""
         for d in recent_dialogues:
-            if 'record_type' in d:
-                record_type = d['record_type']
-                if record_type == "Dialogue" or record_type.startswith("Dialogue"):
-                    dialogue_text += f"{d['speaker']} said to {record_type}: {d['content']}\n"
+            if "record_type" in d:
+                record_type = d["record_type"]
+                if record_type == "对话" or record_type.startswith("对"):
+                    dialogue_text += (
+                        f"{d['speaker']} 对 {record_type} 说：{d['content']}\n"
+                    )
                 else:
-                    dialogue_text += f"{d['speaker']} ({record_type}): {d['content']}\n"
+                    dialogue_text += f"{d['speaker']} ({record_type})：{d['content']}\n"
 
         # 获取当前场景信息
         current_scene = self.script.get(current_scene_id, {})
@@ -1037,38 +1099,41 @@ Please directly provide the guidance content without any preamble:"""
         if next_scene_id and next_scene_id in self.script:
             next_scene = self.script.get(next_scene_id, {})
             next_scene_desc = next_scene.get("description", "")
-            next_scene_info = f"""Planned next scene description:
+            next_scene_info = f"""计划中的下一个场景描述：
 {next_scene_desc}"""
 
         # 构建判断prompt
-        prompt = f"""As a theater director, please determine if a new scene needs to be inserted between the current scene and the next planned scene.
+        prompt = f"""作为戏剧导演，请判断是否需要在当前场景与下一个计划场景之间插入新场景。
 
-Current scene description:
+当前场景描述：
 {current_scene_desc}
 
-Recent dialogue history:
+最近的对话历史：
 {dialogue_text}
 
 {next_scene_info}
 
-Please analyze the following points:
-1. Whether the plot of the current scene has naturally ended.
-2. Whether there are new plot clues in the dialogue history that need to be immediately addressed.
-3. Whether there is a large plot or scene gap between the current scene and the next planned scene.
-4. Whether there are unresolved conflicts or incomplete plots that need to be addressed in a new scene.
+请分析以下几点：
+1. 当前场景的情节是否已经自然结束
+2. 对话历史中是否出现了需要立即处理的新情节线索
+3. 当前场景与下一个计划场景之间是否存在情节或场景跨度过大的问题
+4. 是否有未解决的冲突或未完成的情节需要在新场景中处理
 
-Based on the above analysis, please determine if a new scene needs to be inserted? Please only answer 'Yes' or 'No', then give a brief reason."""
+基于以上分析，请判断是否需要插入新场景？请只回答"是"或"否"，然后给出简短理由。"""
 
         # 调用API进行判断
         messages = [
-            {"role": "system", "content": "You are an experienced theater director, good at analyzing plot development and scene transitions."},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": "你是一位经验丰富的戏剧导演，擅长分析剧情发展和场景转换。",
+            },
+            {"role": "user", "content": prompt},
         ]
 
         result = handle_stream_response(self.client, use_model, messages)
 
         # 判断结果
-        return "Yes" in result[:10] or "Need" in result[:20] or "Should" in result[:20]
+        return "是" in result[:10] or "需要" in result[:20] or "应该" in result[:20]
 
 
 class Player:
@@ -1085,13 +1150,7 @@ class Player:
     """
 
     def __init__(self, name, age, gender):
-        """初始化玩家角色
-
-        Args:
-            name: 玩家扮演的角色名称
-            age: 玩家扮演的角色年龄
-            gender: 玩家扮演的角色性别
-        """
+        """初始化玩家角色"""
         self.name = name
         self.age = age
         self.gender = gender
@@ -1109,8 +1168,8 @@ class Player:
         Returns:
             str: 演员的回应内容
         """
-        if not hasattr(actor, 'speak'):
-            return f"Error: Unable to talk to this object."
+        if not hasattr(actor, "speak"):
+            return f"错误：无法与此对象对话。"
 
         response = actor.speak(message, self.name, guidance)
         return response
@@ -1129,14 +1188,11 @@ class Player:
             str: 场景变化描述
         """
         # 记录互动内容
-        screenwriter.add_dialogue_record(self.name, "Environmental interaction", action)
+        screenwriter.add_dialogue_record(self.name, "环境互动", action)
 
         # 如果提供了场景ID，更新场景描述
         if current_scene_id:
-            updated_scene = screenwriter.transform_scene(
-                current_scene_id,
-                action
-            )
+            updated_scene = screenwriter.transform_scene(current_scene_id, action)
             self.current_scene = updated_scene
 
         return updated_scene
@@ -1188,7 +1244,9 @@ class Screenwriter:
             if "description" in scene_data:
                 self.scene_descriptions[scene_id] = scene_data["description"]
 
-    def generate_scene_description(self, scene_id, director=None, player_character=None):
+    def generate_scene_description(
+        self, scene_id, director=None, player_character=None
+    ):
         """生成场景的详细描述
 
         根据基础描述和角色信息，生成沉浸式的场景描述。
@@ -1204,20 +1262,26 @@ class Screenwriter:
         # 获取基础场景描述
         base_description = self.scene_descriptions.get(scene_id)
         if not base_description:
-            if scene_id in self.initial_script and "description" in self.initial_script[scene_id]:
+            if (
+                scene_id in self.initial_script
+                and "description" in self.initial_script[scene_id]
+            ):
                 base_description = self.initial_script[scene_id]["description"]
             else:
-                return f"Error: No description found for scene {scene_id}"
+                return f"错误：找不到场景 {scene_id} 的描述"
 
         # 获取场景角色信息
         scene_characters = []
         characters_info = ""
 
-        if scene_id in self.initial_script and "characters" in self.initial_script[scene_id]:
+        if (
+            scene_id in self.initial_script
+            and "characters" in self.initial_script[scene_id]
+        ):
             scene_characters = self.initial_script[scene_id]["characters"]
 
             # 如果提供了Director，获取角色详细信息
-            if director and hasattr(director, 'actors'):
+            if director and hasattr(director, "actors"):
                 for char_name in scene_characters:
                     # 跳过玩家角色
                     if player_character and char_name == player_character:
@@ -1225,59 +1289,61 @@ class Screenwriter:
 
                     if char_name in director.actors:
                         actor = director.actors[char_name]
-                        char_info = f"- {char_name}: {actor.age} years old, {actor.gender}\n"
+                        char_info = f"- {char_name}：{actor.age}岁，{actor.gender}\n"
 
                         # 添加性格特征
-                        if hasattr(actor, 'get_traits') and actor.get_traits():
+                        if hasattr(actor, "get_traits") and actor.get_traits():
                             traits = actor.get_traits()
-                            char_info += f"  Personality traits: {', '.join(traits)}\n"
+                            char_info += f"  性格特征：{', '.join(traits)}\n"
 
                         # 添加与其他角色的关系
-                        if hasattr(actor, 'get_all_relationships'):
+                        if hasattr(actor, "get_all_relationships"):
                             relationships = actor.get_all_relationships()
                             if relationships:
-                                char_info += "  Relationships with other characters:\n"
+                                char_info += "  与其他角色的关系：\n"
                                 for other_name, rel_list in relationships.items():
                                     if other_name in scene_characters:
                                         for rel in rel_list:
-                                            rel_type = rel.get('type', '')
-                                            rel_desc = rel.get('description', '')
+                                            rel_type = rel.get("type", "")
+                                            rel_desc = rel.get("description", "")
                                             if rel_desc:
-                                                char_info += f"    - With {other_name}: {rel_type} ({rel_desc})\n"
+                                                char_info += f"    - 与{other_name}：{rel_type}（{rel_desc}）\n"
                                             else:
-                                                char_info += f"    - With {other_name}: {rel_type}\n"
+                                                char_info += f"    - 与{other_name}：{rel_type}\n"
 
                         characters_info += char_info
 
         # 构建生成场景描述的prompt
-        prompt = f"""Based on the following base description of the scene and character information, generate a more detailed description of the scene, including the scene environment, items in the scene, and non-player characters:
+        prompt = f"""根据以下场景基础描述和角色信息，生成更加详细的场景描述，包括场景环境、场景中的物品和场景中的非玩家人物：
 
-Base description of the scene: {base_description}
+场景基础描述：{base_description}
 
 """
 
         if characters_info:
-            prompt += f"""Character information in the scene:
+            prompt += f"""场景中的角色信息：
 {characters_info}
 """
 
         if player_character:
-            prompt += f"""Note: The player character "{player_character}" in the scene does not need to be described in detail because the player will control this character themselves.
+            prompt += f"""注意：场景中的玩家角色"{player_character}"不需要被详细描述，因为玩家将自己控制这个角色。
 """
 
-        prompt += """Please provide:
-1. Environment description: including spatial layout, lighting, sound, smell, etc.
-2. Item description: list the main items in the scene and their placement
-3. Non-player character description: describe the appearance, posture, current behavior, and emotional state of the characters in the scene (excluding the player character), and the personality description should be consistent with the above character information
-4. Player character goal description: describe the general goal of the player character in the current scene
+        prompt += """请提供：
+1. 环境描述：包括空间布局、光线、声音、气味等
+2. 物品描述：列出场景中的主要物品及其摆放位置
+3. 非玩家角色描述：描述场景中的角色（不包括玩家角色）的外貌、姿态、当前行为和情绪状态，性格描述应与上述角色信息保持一致
+4. 玩家角色目标描述：描述玩家角色在当前场景中的大致目标
 
-Please use vivid and vivid language to create an immersive scene experience."""
+请使用生动形象的语言，创造出沉浸式的场景体验。"""
 
         # 调用API生成详细场景描述
         messages = [
-            {"role": "system",
-             "content": "You are an experienced drama screenwriter, good at creating vivid and detailed scene descriptions."},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": "你是一位经验丰富的戏剧编剧，擅长创造生动详实的场景描述。",
+            },
+            {"role": "user", "content": prompt},
         ]
 
         detailed_description = handle_stream_response(self.client, use_model, messages)
@@ -1294,19 +1360,19 @@ Please use vivid and vivid language to create an immersive scene experience."""
 
         Args:
             speaker: 说话者或行动者名称
-            record_type: 记录类型，如"Dialogue"、"Narrative"等
+            record_type: 记录类型，如"对话"、"旁白"、"场景描述"、"环境互动"等
             content: 内容
-            target: 对话接收者（可选）
+            target: 对话接收者（可选，仅在record_type为"对话"时有意义）
         """
         record = {
             "time": len(self.dialogue_history),
             "speaker": speaker,
             "record_type": record_type,
-            "content": content
+            "content": content,
         }
 
-        # 如果是对话类型且有目标，添加目标字段
-        if target and (record_type == "dialogue" or record_type.startswith("dialogue")):
+        # 如果提供了target且record_type为对话相关类型，则记录对话目标
+        if target and (record_type == "对话" or record_type.startswith("对")):
             record["target"] = target
 
         self.dialogue_history.append(record)
@@ -1330,7 +1396,13 @@ Please use vivid and vivid language to create an immersive scene experience."""
         """
         return self.dialogue_history if self.dialogue_history else []
 
-    def generate_new_script(self, current_scene_id, player_feedback=None, max_retries=3, dialogue_history=None):
+    def generate_new_script(
+        self,
+        current_scene_id,
+        player_feedback=None,
+        max_retries=3,
+        dialogue_history=None,
+    ):
         """根据历史对话生成新场景
 
         基于当前场景和对话历史，生成下一个场景的剧本。
@@ -1347,14 +1419,18 @@ Please use vivid and vivid language to create an immersive scene experience."""
         # 生成下一个场景ID
         try:
             import re
-            scene_num_match = re.search(r'(\d+)', current_scene_id)
+
+            scene_num_match = re.search(r"(\d+)", current_scene_id)
             if scene_num_match:
                 scene_num = int(scene_num_match.group(1))
-                next_scene_id = current_scene_id.replace(str(scene_num), str(scene_num + 1))
+                next_scene_id = current_scene_id.replace(
+                    str(scene_num), str(scene_num + 1)
+                )
             else:
                 next_scene_id = f"{current_scene_id}_1"
         except:
             import time
+
             next_scene_id = f"scene_{int(time.time())}"
 
         # 获取当前场景信息
@@ -1369,79 +1445,87 @@ Please use vivid and vivid language to create an immersive scene experience."""
         if dialogue_history:
             for d in dialogue_history:
                 if isinstance(d, dict):
-                    speaker = d.get('speaker', '')
-                    record_type = d.get('record_type', '')
-                    content = d.get('content', '')
-                    if record_type == "dialogue" or record_type.startswith("dialogue"):
-                        if 'target' in d:
-                            dialogue_text += f"{speaker} says to {d.get('target')}: {content}\n"
+                    speaker = d.get("speaker", "")
+                    record_type = d.get("record_type", "")
+                    content = d.get("content", "")
+                    if record_type == "对话" or record_type.startswith("对"):
+                        if "target" in d:
+                            dialogue_text += (
+                                f"{speaker} 对 {d.get('target')} 说：{content}\n"
+                            )
                         else:
-                            dialogue_text += f"{speaker} ({record_type}): {content}\n"
+                            dialogue_text += f"{speaker} ({record_type})：{content}\n"
                     else:
-                        dialogue_text += f"{speaker} ({record_type}): {content}\n"
+                        dialogue_text += f"{speaker} ({record_type})：{content}\n"
         else:
             recent_dialogues = self.get_dialogue_history(limit=20)
             for d in recent_dialogues:
-                if 'record_type' in d:
-                    record_type = d.get('record_type', '')
-                    if record_type == "dialogue" or record_type.startswith("dialogue"):
-                        if 'target' in d:
-                            dialogue_text += f"{d['speaker']} says to {d.get('target')}: {d['content']}\n"
+                if "record_type" in d:
+                    record_type = d.get("record_type", "")
+                    if record_type == "对话" or record_type.startswith("对"):
+                        if "target" in d:
+                            dialogue_text += f"{d['speaker']} 对 {d.get('target')} 说：{d['content']}\n"
                         else:
-                            dialogue_text += f"{d['speaker']} ({record_type}): {d['content']}\n"
+                            dialogue_text += (
+                                f"{d['speaker']} ({record_type})：{d['content']}\n"
+                            )
                     else:
-                        dialogue_text += f"{d['speaker']} ({record_type}): {d['content']}\n"
+                        dialogue_text += (
+                            f"{d['speaker']} ({record_type})：{d['content']}\n"
+                        )
                 else:
-                    dialogue_text += f"{d['speaker']}: {d['content']}\n"
+                    dialogue_text += f"{d['speaker']}：{d['content']}\n"
 
         # 最多重试max_retries次生成新场景
         for attempt in range(max_retries):
-            prompt = f"""As a screenwriter, please generate the next scene of the script based on the following information:
+            prompt = f"""作为编剧，请根据以下信息生成剧本的下一个场景：
 
-Current scene: {scene_desc}
+当前场景：{scene_desc}
 
-Current scene characters: {', '.join(current_characters)}
+当前场景中的角色：{', '.join(current_characters)}
 
-Dialogue history:
+对话历史：
 {dialogue_text}
 
 """
 
             if player_feedback:
                 prompt += f"""
-Player feedback:
+玩家反馈：
 {player_feedback}
 
 """
 
-            prompt += """Please create the next scene of the script based on the above information. Pay special attention to:
-1. The new scene must be consistent with the dialogue history and cannot have contradictions.
-2. The actions and dialogues of the characters must conform to their personality traits.
-3. The scene transition must be natural and the plot development must be reasonable.
+            prompt += """请根据上述信息，创作剧本的下一个场景。特别注意：
+1. 新场景必须与对话历史保持一致，不能出现矛盾
+2. 角色的行为和对话必须符合其性格特点
+3. 场景转换要自然，情节发展要合理
 
-You must strictly return in the following JSON format, which is required by the system:
+你必须严格按照以下JSON格式返回，这是系统必须的格式：
 {
-    "description": "Detailed description of the scene",
-    "characters": ["Character name 1", "Character name 2", ...],
+    "description": "详细的场景描述",
+    "characters": ["角色名1", "角色名2", ...],
     "dialogues": [
-        {"character": "Character name 1", "content": "(Character's expression and action) Dialogue content 1"},
-        {"character": "Character name 2", "content": "(Character's expression and action) Dialogue content 2"},
+        {"character": "角色名1", "content": "（角色表情与动作）对话内容1"},
+        {"character": "角色名2", "content": "（角色表情与动作）对话内容2"},
         ...
     ]
 }
 
-Note:
-1. Only return the content of one scene.
-2. The JSON format must be completely correct, without any explanations or extra text.
-3. The dialogue content should conform to the character's characteristics and promote the plot development.
-4. Do not generate the scene_id field, the system will handle it automatically.
-5. Ensure that the new scene is consistent with the previous dialogue and plot."""
+注意：
+1. 只返回一个场景的内容
+2. JSON格式必须完全正确，不要有任何解释或额外文本
+3. 对话内容应该符合角色特点并推动情节发展
+4. 不要生成scene_id字段，系统会自动处理
+5. 确保新场景与之前的对话和情节保持连贯性"""
 
             # 调用API生成新场景
             messages = [
-                {"role": "system",
-                 "content": "You are an experienced screenwriter, specializing in creating scripts for interactive dramas. You must return the results in the required JSON format and ensure that the new scene is consistent with the historical dialogue and plot."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "system",
+                    "content": "你是一位经验丰富的编剧，专门为互动式戏剧创作剧本。你必须按照要求的JSON格式返回结果，并确保新场景与历史对话和情节保持一致性。",
+                },
+                {"role": "user", "content": prompt},
             ]
 
             generated_text = handle_stream_response(self.client, use_model, messages)
@@ -1451,7 +1535,7 @@ Note:
                 import json
                 import re
 
-                json_match = re.search(r'\{[\s\S]*\}', generated_text)
+                json_match = re.search(r"\{[\s\S]*\}", generated_text)
                 if json_match:
                     generated_text = json_match.group(0)
 
@@ -1459,13 +1543,13 @@ Note:
 
                 # 验证必需字段
                 if not all(key in new_scene for key in ["description", "dialogues"]):
-                    raise ValueError("Generated JSON is missing required fields")
+                    raise ValueError("生成的JSON缺少必要字段")
 
                 # 保存新场景
                 self.initial_script[next_scene_id] = {
                     "description": new_scene["description"],
                     "characters": new_scene["characters"],
-                    "dialogues": new_scene["dialogues"]
+                    "dialogues": new_scene["dialogues"],
                 }
 
                 self.scene_descriptions[next_scene_id] = new_scene["description"]
@@ -1477,7 +1561,11 @@ Note:
                 if attempt < max_retries - 1:
                     continue
                 else:
-                    return {"error": str(e), "generated_text": generated_text, "next_scene_id": next_scene_id}
+                    return {
+                        "error": str(e),
+                        "generated_text": generated_text,
+                        "next_scene_id": next_scene_id,
+                    }
 
     def generate_actor_response_suggestions(self, actor_name, player_action):
         """为演员生成回应建议
@@ -1495,49 +1583,55 @@ Note:
         recent_dialogues = self.get_dialogue_history(limit=5)
         dialogue_text = ""
         for d in recent_dialogues:
-            if 'record_type' in d:
-                record_type = d['record_type']
-                if record_type == "dialogue" or record_type.startswith("dialogue"):
-                    if 'target' in d:
-                        dialogue_text += f"{d['speaker']} says to {d.get('target')}: {d['content']}\n"
+            if "record_type" in d:
+                record_type = d["record_type"]
+                if record_type == "对话" or record_type.startswith("对"):
+                    if "target" in d:
+                        dialogue_text += (
+                            f"{d['speaker']} 对 {d['target']} 说：{d['content']}\n"
+                        )
                     else:
-                        dialogue_text += f"{d['speaker']} ({record_type}): {d['content']}\n"
+                        dialogue_text += (
+                            f"{d['speaker']} ({record_type})：{d['content']}\n"
+                        )
                 else:
-                    dialogue_text += f"{d['speaker']} ({record_type}): {d['content']}\n"
+                    dialogue_text += f"{d['speaker']} ({record_type})：{d['content']}\n"
             else:
-                dialogue_text += f"{d['speaker']}: {d['content']}\n"
+                dialogue_text += f"{d['speaker']}：{d['content']}\n"
 
         # 构建生成建议的prompt
-        prompt = f"""Please provide 3-5 possible responses for the actor '{actor_name}' based on the following context:
+        prompt = f"""请根据以下上下文为演员'{actor_name}'提供3-5个可能的回应：
 
-Player action: {player_action}
+玩家动作：{player_action}
 
-Recent dialogue history:
+最近对话历史：
 {dialogue_text}
 
-Please provide response suggestions that are consistent with the character's personality and the current situation. Each suggestion should include:
-1. The character's expression and action
-2. The dialogue content
+请提供符合角色性格和当前情境的回应建议。每个建议应包括：
+1. 角色的表情和动作
+2. 对话内容
 
-Format each suggestion as: "(Expression and action) Dialogue content"
+每个建议格式为："（表情和动作）对话内容"
 
-Do not include any explanations or extra text."""
+不要包含任何解释或额外文本。"""
 
         # 调用API生成建议
         messages = [
-            {"role": "system",
-             "content": "You are an experienced screenwriter who specializes in creating actor responses for interactive dramas."},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": "你是一位经验丰富的编剧，专门为互动式戏剧创作演员回应。",
+            },
+            {"role": "user", "content": prompt},
         ]
 
         response = handle_stream_response(self.client, use_model, messages)
 
         # 解析建议列表
         suggestions = []
-        lines = response.split('\n')
+        lines = response.split("\n")
         for line in lines:
             line = line.strip()
-            if line and ('(' in line and ')' in line):
+            if line and ("(" in line and ")" in line):
                 suggestions.append(line)
 
         return suggestions
@@ -1558,26 +1652,25 @@ Do not include any explanations or extra text."""
         current_scene = self.scene_descriptions.get(scene_id, "")
 
         # 构建转换prompt
-        prompt = f"""Please describe how the scene changes based on the player's action.
+        prompt = f"""请描述玩家动作后场景如何变化。
 
-Current scene description:
+当前场景描述：
 {current_scene}
 
-Player action: {player_action}
+玩家动作：{player_action}
 
-Please provide a detailed description of the changes in the scene, including:
-1. Changes in the environment
-2. Changes in the positions or states of items
-3. Changes in the reactions or behaviors of characters
-4. Any new elements that appear
+请提供场景变化的详细描述，包括：
+1. 环境变化
+2. 物品位置或状态的变化
+3. 角色反应或行为的变化
+4. 出现的任何新元素
 
-Keep the description concise but vivid."""
+描述要简洁但生动。"""
 
         # 调用API生成场景变化描述
         messages = [
-            {"role": "system",
-             "content": "You are an experienced screenwriter who specializes in describing scene transformations."},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": "你是一位经验丰富的编剧，专门描述场景变化。"},
+            {"role": "user", "content": prompt},
         ]
 
         response = handle_stream_response(self.client, use_model, messages)
@@ -1611,24 +1704,23 @@ Keep the description concise but vivid."""
             next_scene_desc = next_scene.get("description", "")
 
         # 构建转场描述prompt
-        prompt = f"""Please provide a scene transition description based on the following information:
+        prompt = f"""请根据以下信息提供场景转场描述：
 
-Current scene description:
+当前场景描述：
 {current_scene_desc}
 
-Last interaction:
+最后一次互动：
 {last_interaction}
 
-Next scene description (if any):
+下一个场景描述（如果有）：
 {next_scene_desc}
 
-Please provide a natural and smooth transition description that connects the current scene to the next scene (or the end of the story if there is no next scene)."""
+请提供一个自然流畅的转场描述，将当前场景连接到下一个场景（如果没有下一个场景，则连接到故事的结尾）。"""
 
         # 调用API生成转场描述
         messages = [
-            {"role": "system",
-             "content": "You are an experienced screenwriter who specializes in creating scene transitions."},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": "你是一位经验丰富的编剧，专门创作场景转场。"},
+            {"role": "user", "content": prompt},
         ]
 
         return handle_stream_response(self.client, use_model, messages)

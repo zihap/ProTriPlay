@@ -14,7 +14,7 @@ ark_api_key = os.getenv("ARK_API_KEY", "<Your-Ark-API-KEY>")
 # 默认使用北京区域的火山方舟API地址
 ark_base_url = os.getenv("API_URL", "https://ark.cn-beijing.volces.com/api/plan/v3")
 
-# 火山方舟对话模型名称，使用deepseek-v4-pro进行对话生成
+# 火山方舟对话模型名称，使用指定模型（可自选）进行对话生成
 ark_model = "deepseek-v4-pro"
 
 # 火山方舟向量模型名称，使用doubao-embedding-vision进行文本向量化

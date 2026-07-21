@@ -6,18 +6,26 @@ CoC风格互动叙事游戏测试脚本
 文件结构：
 1. 角色初始化：玩家角色和NPC角色创建
 2. 剧本定义：4个预定义场景的CoC风格剧本
-3. 游戏流程：场景循环、玩家交互、场景切换
+3. 游戏流程：场景循环、自动对话推进、场景切换
 4. 动态生成：根据情节发展插入新场景或生成结局
 5. 结果导出：对话历史保存到JSON文件
+
+核心机制：
+- 导演(Director)：负责场景切换和角色调度
+- 编剧(Screenwriter)：负责剧本生成和对话历史管理  
+- 主角(Player)：固定主角，由AI自动生成对话
+- 演员(Actor)：NPC角色，根据记忆和关系生成回应
 """
 
 from role import Actor, Player, Screenwriter, Director
 from config import max_inserted_scenes, try_chance
+import json
+import datetime
 
 
 # ==================== 角色初始化 ====================
 
-# 创建玩家角色（调查员）
+# 创建玩家角色（调查员）- 固定主角，由AI自动生成对话
 player = Player("霍华德", 25, "男")
 
 # 创建NPC角色：图书管理员玛莎·迪尔
@@ -111,6 +119,7 @@ current_scene_index = 0                       # 当前场景索引
 new_scene_generation_count = 0                # 新场景生成次数（用于限制动态生成）
 max_new_scene_generations = 1                 # 最大允许生成的新场景数
 inserted_scene_count = 0                      # 插入场景次数（用于限制场景插入）
+scene_interaction_count = 3                   # 每个场景的对话轮数
 
 
 # ==================== 剧本加载 ====================
@@ -123,6 +132,84 @@ screenwriter.load_initial_script(coc_script)
 
 # 设置初始场景
 director.set_current_scene(script_ids[current_scene_index])
+
+
+# ==================== 自动生成主角对话 ====================
+
+def generate_player_response(director, screenwriter, player_name, target_actor):
+    """自动生成主角的对话回应
+
+    根据当前场景、对话历史和角色设定，生成符合主角性格的对话内容。
+
+    Args:
+        director: Director对象，用于获取场景信息
+        screenwriter: Screenwriter对象，用于获取对话历史
+        player_name: 主角名称
+        target_actor: 目标对话角色对象
+
+    Returns:
+        str: 主角的对话内容
+    """
+    # 获取当前场景信息
+    current_scene_id = director.get_current_scene()
+    scene_desc = director.get_scene_description(current_scene_id)
+    
+    # 获取对话历史
+    recent_dialogues = screenwriter.get_dialogue_history(limit=10)
+    dialogue_history_text = ""
+    for d in recent_dialogues:
+        if d["record_type"] == "对话" or d["record_type"].startswith("对"):
+            if "target" in d:
+                dialogue_history_text += f"{d['speaker']} 对 {d['target']} 说：{d['content']}\n"
+            else:
+                dialogue_history_text += f"{d['speaker']}：{d['content']}\n"
+
+    # 获取目标角色信息
+    target_name = target_actor.name
+    target_traits = target_actor.get_traits()
+    target_relationships = target_actor.get_all_relationships()
+    
+    # 构建生成主角对话的prompt
+    prompt = f"""你是一位经验丰富的互动叙事作家，负责为角色'{player_name}'生成对话内容。
+
+当前场景描述：
+{scene_desc}
+
+目标对话角色：{target_name}
+角色性格特征：{', '.join(target_traits) if target_traits else '未知'}
+
+最近的对话历史：
+{dialogue_history_text}
+
+请根据以上信息，为'{player_name}'生成一段符合以下要求的对话：
+1. 对话内容必须与当前场景和对话历史保持一致
+2. 对话风格应符合CoC（克苏鲁的呼唤）风格：神秘、紧张、带有探究意味
+3. 对话应推动情节发展，揭示新信息或提出关键问题
+4. 对话应符合联邦调查员的身份：专业、谨慎、注重证据
+5. 对话不要重复之前说过的内容，要有新的信息或角度
+
+请直接返回对话内容，不要包含角色名称或动作描述："""
+
+    # 调用API生成对话
+    from role import get_client, handle_stream_response, use_model
+    client = get_client()
+    
+    messages = [
+        {
+            "role": "system",
+            "content": f"你是角色'{player_name}'的扮演者。请根据当前场景和对话历史，生成符合角色身份和性格的对话内容。对话应推动剧情发展，不要重复之前的内容。",
+        },
+        {"role": "user", "content": prompt},
+    ]
+    
+    response = handle_stream_response(client, use_model, messages)
+    
+    # 清理可能的格式标记
+    response = response.strip()
+    if response.startswith('"') and response.endswith('"'):
+        response = response[1:-1]
+    
+    return response
 
 
 # ==================== 游戏主循环 ====================
@@ -160,7 +247,7 @@ while current_scene_index < len(script_ids):
             character_name = dialogue.get("character")
             content = dialogue.get("content")
             
-            # 跳过玩家角色的预设对话（玩家对话由用户输入）
+            # 跳过玩家角色的预设对话（玩家对话由AI自动生成）
             if character_name == player.get_player_name():
                 continue
                 
@@ -170,136 +257,76 @@ while current_scene_index < len(script_ids):
             # 记录到对话历史
             screenwriter.add_dialogue_record(character_name, "场景对话", content)
 
-    # 显示当前场景可交互的角色列表
-    print("\n当前场景可对话角色:")
+    # 获取当前场景可交互的角色列表
     characters = director.get_scene_characters(player=player)
-    print(characters)
+    print("\n当前场景可对话角色:", characters)
 
 
-    # ==================== 场景内交互循环 ====================
-    # 每个场景玩家有try_chance次交互机会
+    # ==================== 场景内自动对话循环 ====================
+    # 每个场景自动进行scene_interaction_count轮对话
     scene_finished = False       # 场景是否已结束
     should_exit_game = False     # 是否需要退出游戏
     last_interaction = ""        # 记录最后一次交互内容（用于场景结束描述）
+    interaction_round = 0        # 当前对话轮数
     
-    for i in range(try_chance):
-        if scene_finished:
-            break
+    while not scene_finished and interaction_round < scene_interaction_count:
+        interaction_round += 1
+        print(f"\n==== 第 {interaction_round} 轮对话 ====")
+        
+        # 选择一个对话对象（优先选择与剧情相关的角色）
+        if characters:
+            # 优先选择最近有对话的角色，或者随机选择
+            selected_character_name = characters[0]
             
-        # 显示操作菜单
-        print("\n==== 请选择你的行动 ====")
-        print("1. 与人物对话")
-        print("2. 与环境互动")
-        print("next. 进入下一个场景")
-        print("esc. 退出戏剧")
-        action = input("请输入你的选择: ")
-
-        # 处理对话操作
-        if action == "1":
-            print("\n==== 请选择对话对象 ====")
-            for j, character in enumerate(characters):
-                print(f"{j+1}. {character}")
-            choice = input("请选择对话对象: ")
+            # 获取目标角色实例
+            actor_instance = director.actors.get(selected_character_name)
             
-            # 验证玩家输入是否有效
-            if choice.isdigit() and 1 <= int(choice) <= len(characters):
-                selected_character = characters[int(choice) - 1]
-                print(f"\n==== 请输入对话内容 ====")
-                dialogue = input("请输入对话内容: ")
+            if actor_instance:
+                # 自动生成主角对话
+                player_dialogue = generate_player_response(director, screenwriter, player.name, actor_instance)
+                print(f"\n{player.name}: {player_dialogue}")
                 
                 # 记录交互内容
-                last_interaction = f"{player.name}对{selected_character}说：{dialogue}"
+                last_interaction = f"{player.name}对{selected_character_name}说：{player_dialogue}"
                 
                 # 添加玩家对话到历史记录
-                screenwriter.add_dialogue_record(player.name, "对话", dialogue, target=selected_character)
+                screenwriter.add_dialogue_record(player.name, "对话", player_dialogue, target=selected_character_name)
                 
                 # 生成NPC对话指导（基于玩家对话和角色设定）
-                guide_message = director.guide_actor_from_player_speech(dialogue, selected_character)
+                guide_message = director.guide_actor_from_player_speech(player_dialogue, selected_character_name)
                 
-                # 获取目标角色实例并执行对话
-                actor_instance = director.actors.get(selected_character)
-                if actor_instance:
-                    # 调用AI生成NPC回应
-                    response = player.talk_to_actor(actor_instance, dialogue, guide_message)
-                    last_interaction += f"\n{selected_character}回应：{response}"
-                    
-                    # 记录NPC回应到历史
-                    screenwriter.add_dialogue_record(selected_character, "对话", response, target=player.name)
-                    
-                    print(f"\n{selected_character}: {response}")
+                # 调用AI生成NPC回应
+                response = player.talk_to_actor(actor_instance, player_dialogue, guide_message)
+                last_interaction += f"\n{selected_character_name}回应：{response}"
+                
+                # 记录NPC回应到历史
+                screenwriter.add_dialogue_record(selected_character_name, "对话", response, target=player.name)
+                
+                print(f"\n{selected_character_name}: {response}")
 
-                    # 判断场景是否应该结束（基于NPC回应内容）
-                    if not director.is_scene_continuing(response):
-                        print("当前场景结束")
-                        scene_finished = True
-                        # 获取下一个场景ID
-                        next_scene = script_ids[current_scene_index + 1] if current_scene_index + 1 < len(script_ids) else None
-                        # 生成场景结束描述
-                        ending_description = screenwriter.end_scene(last_interaction, director, current_scene_id, next_scene)
-                        print(f"\n{ending_description}")
-                        # 记录场景转场
-                        screenwriter.add_dialogue_record("旁白", "场景转场", f"从{current_scene_id}场景转场到{next_scene if next_scene else '故事结束'}")
-                    else:
-                        print("当前场景继续")
+                # 判断场景是否应该结束（基于NPC回应内容）
+                if not director.is_scene_continuing(response, screenwriter, detailed_scene):
+                    print("\n当前场景结束")
+                    scene_finished = True
+                    # 获取下一个场景ID
+                    next_scene = script_ids[current_scene_index + 1] if current_scene_index + 1 < len(script_ids) else None
+                    # 生成场景结束描述
+                    ending_description = screenwriter.end_scene(last_interaction, director, current_scene_id, next_scene)
+                    print(f"\n{ending_description}")
+                    # 记录场景转场
+                    screenwriter.add_dialogue_record("旁白", "场景转场", f"从{current_scene_id}场景转场到{next_scene if next_scene else '故事结束'}")
                 else:
-                    print(f"错误：找不到角色 {selected_character} 的实例")
+                    print("\n当前场景继续")
             else:
-                print("无效的选择，请重新输入。")
-        
-        # 处理环境互动操作
-        elif action == "2":
-            print("\n==== 请输入互动内容 ====")
-            interaction = input("请输入互动内容: ")
-            last_interaction = f"{player.name}与环境互动：{interaction}"
-            
-            # 记录玩家互动
-            screenwriter.add_dialogue_record(player.name, "环境互动", interaction)
-            
-            # 生成环境响应（由AI根据场景和互动内容生成）
-            action_response = screenwriter.transform_scene(current_scene_id, interaction)
-            last_interaction += f"\n环境响应：{action_response}"
-
-            print(f"\n{action_response}")
-
-            # 判断场景是否应该结束
-            if not director.is_scene_continuing(action_response):
-                print("当前场景结束")
-                scene_finished = True
-                next_scene = script_ids[current_scene_index + 1] if current_scene_index + 1 < len(script_ids) else None
-                ending_description = screenwriter.end_scene(last_interaction, director, current_scene_id, next_scene)
-                print(f"\n{ending_description}")
-                screenwriter.add_dialogue_record("旁白", "场景转场", f"从{current_scene_id}场景转场到{next_scene if next_scene else '故事结束'}")
-            else:
-                print("当前场景继续")
-        
-        # 处理手动切换场景
-        elif action.lower() == "next":
-            print("手动结束当前场景，进入下一个场景")
-            scene_finished = True
-            
-            next_scene = script_ids[current_scene_index + 1] if current_scene_index + 1 < len(script_ids) else None
-            
-            if next_scene:
-                ending_description = screenwriter.end_scene(last_interaction or "玩家选择跳过当前场景", director, current_scene_id, next_scene)
-                print(f"\n{ending_description}")
-                screenwriter.add_dialogue_record("旁白", "场景转场", f"从{current_scene_id}场景转场到{next_scene}")
-            else:
-                print("\n没有更多场景，故事结束")
-                should_exit_game = True
-        
-        # 处理退出游戏
-        elif action.lower() == "esc":
-            should_exit_game = True
-            break
-        
-        # 无效输入处理
+                print(f"错误：找不到角色 {selected_character_name} 的实例")
         else:
-            print("无效的选择，请重新输入。")
+            print("当前场景没有可对话的角色")
+            scene_finished = True
     
     # ==================== 场景机会用尽处理 ====================
-    # 当玩家用尽交互机会但场景未正常结束时，执行强制结束逻辑
+    # 当对话轮数用尽但场景未正常结束时，执行强制结束逻辑
     if not scene_finished and not should_exit_game:
-        print("\n==== 场景对话机会已用完，生成场景强制结束 ====")
+        print("\n==== 场景对话轮数已用完，生成场景强制结束 ====")
         
         next_scene = script_ids[current_scene_index + 1] if current_scene_index + 1 < len(script_ids) else None
         
@@ -408,8 +435,6 @@ print("\n==== 表演结束 ====")
 
 # ==================== 对话历史导出 ====================
 # 将游戏过程中的所有对话记录导出到JSON文件，用于后续分析和测评
-import json
-import datetime
 
 # 生成带时间戳的文件名，避免覆盖
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -423,6 +448,3 @@ with open(dialogue_history_file, "w", encoding="utf-8") as f:
     json.dump(dialogue_history, f, ensure_ascii=False, indent=2)
 
 print(f"\n对话历史已导出到文件: {dialogue_history_file}")
-
-
-

@@ -1,0 +1,15 @@
+[project]
+name = "newtest"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "faiss-cpu>=1.14.3",
+    "numpy>=2.5.1",
+    "openai>=2.46.0",
+    "pytest>=9.1.1",
+    "python-dotenv>=1.2.2",
+    "volcengine-python-sdk>=5.0.41",
+    "volcenginesdkarkruntime>=0.0.1",
+]

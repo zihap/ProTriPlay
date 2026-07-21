@@ -1,12 +1,10 @@
-import openai
 import faiss
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import List
 import pickle
 import os
 from openai import OpenAI
 from volcenginesdkarkruntime import Ark
-from typing_extensions import AnyStr
 from config import (
     ark_api_key,
     ark_base_url,
@@ -240,13 +238,19 @@ class Actor:
         """添加新记忆到记忆库
 
         将文本转换为向量后存储，并更新FAISS索引。
+        自动去重：避免重复记忆累积；
+        数量限制：最多保留20条记忆，超出时移除最旧的记忆。
 
         Args:
             memory_text: 记忆文本内容
 
         Returns:
-            int: 新记忆在记忆列表中的索引位置
+            int: 新记忆在记忆列表中的索引位置，重复记忆返回-1
         """
+        # 去重检查：避免重复记忆累积
+        if memory_text in self.memories:
+            return -1
+
         # 获取文本向量表示
         embedding = self._get_embedding(memory_text)
 
@@ -258,6 +262,12 @@ class Actor:
             self.memory_embeddings = embedding.reshape(1, -1)
         else:
             self.memory_embeddings = np.vstack([self.memory_embeddings, embedding])
+
+        # 记忆数量限制：最多保留20条，避免内存过度消耗
+        max_memories = 20
+        if len(self.memories) > max_memories:
+            self.memories = self.memories[-max_memories:]
+            self.memory_embeddings = self.memory_embeddings[-max_memories:]
 
         # 重建FAISS索引
         self.index.reset()
@@ -306,6 +316,8 @@ class Actor:
         """检索与查询相关的记忆
 
         使用FAISS向量索引进行相似度搜索，返回最相关的k条记忆。
+        添加文本相似度去重：过滤与已返回记忆相似度超过70%的记忆，
+        确保返回的记忆信息具有多样性和独特性。
 
         Args:
             query: 查询文本
@@ -317,12 +329,41 @@ class Actor:
         if len(self.memories) == 0:
             return []
 
-        # 获取查询向量并进行搜索
+        # 获取查询向量并进行搜索（搜索2k条以确保有足够的候选）
         query_embedding = self._get_embedding(query).reshape(1, -1)
-        scores, indices = self.index.search(query_embedding, min(k, len(self.memories)))
+        scores, indices = self.index.search(query_embedding, min(k * 2, len(self.memories)))
 
-        # 返回对应的记忆文本
-        return [self.memories[idx] for idx in indices[0]]
+        # 添加去重逻辑：过滤文本相似度超过70%的记忆
+        results = []
+        seen_texts = set()
+        
+        for idx in indices[0]:
+            memory_text = self.memories[idx]
+            
+            # 检查是否已存在完全相同的记忆
+            if memory_text in seen_texts:
+                continue
+            
+            # 检查文本相似度去重
+            is_duplicate = False
+            for existing in results:
+                # 使用词集合相似度判断
+                memory_words = set(memory_text.split())
+                existing_words = set(existing.split())
+                if memory_words and existing_words:
+                    similarity = len(memory_words & existing_words) / len(memory_words)
+                    if similarity > 0.7:
+                        is_duplicate = True
+                        break
+            
+            if not is_duplicate:
+                results.append(memory_text)
+                seen_texts.add(memory_text)
+            
+            if len(results) >= k:
+                break
+
+        return results
 
     def add_trait(self, trait_description):
         """添加性格特征到角色

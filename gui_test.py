@@ -1,13 +1,8 @@
 import tkinter as tk
-from tkinter import scrolledtext, ttk, messagebox
+from tkinter import scrolledtext, messagebox
 import threading
 import sys
-import io
 import os
-import faiss
-import numpy as np
-from typing import List, Dict, Tuple
-import pickle
 from openai import OpenAI
 from config import ark_api_key, ark_base_url, ark_model, ark_embedding_model, ark_embedding_dim, openai_api_key, deepseek_api_key, qwen_api_key, http_proxy, https_proxy, use_model, try_chance, max_new_scene_generations, max_inserted_scenes
 from role import Actor, Director, Player, Screenwriter, parse_ark_response, handle_stream_response, get_ark_client, get_client
